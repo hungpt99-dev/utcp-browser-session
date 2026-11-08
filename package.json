@@ -1,0 +1,52 @@
+{
+  "name": "utcp-browser-session",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Turn your existing authenticated browser sessions into AI-callable UTCP tools.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/provider",
+    "packages/runtime",
+    "packages/test-site",
+    "dashboard",
+    "extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w @utcp-browser-session/dashboard && npm run build -w @utcp-browser-session/extension",
+    "build:dashboard": "npm run build -w @utcp-browser-session/dashboard",
+    "build:extension": "npm run build -w @utcp-browser-session/extension",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "node scripts/lint.mjs",
+    "test": "node --test --test-reporter=spec \"tests/unit/**/*.test.ts\" \"tests/integration/**/*.test.ts\" \"tests/security/**/*.test.ts\"",
+    "test:unit": "node --test --test-reporter=spec \"tests/unit/**/*.test.ts\"",
+    "test:integration": "node --test --test-reporter=spec \"tests/integration/**/*.test.ts\"",
+    "test:security": "node --test --test-reporter=spec \"tests/security/**/*.test.ts\"",
+    "test:e2e": "playwright test -c tests/e2e/playwright.config.ts",
+    "bench": "node tests/bench/benchmark.ts",
+    "site": "node packages/test-site/src/server.ts",
+    "runtime": "node packages/runtime/src/index.ts serve",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "pair": "node packages/runtime/src/index.ts pair",
+    "status:cli": "node packages/runtime/src/index.ts status",
+    "tools:cli": "node packages/runtime/src/index.ts tools",
+    "manual:cli": "node packages/runtime/src/index.ts manual",
+    "icons": "node scripts/make-icons.mjs",
+    "screenshots": "node scripts/capture.mjs",
+    "verify:full": "npm run verify && xvfb-run -a npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.0"
+  }
+}

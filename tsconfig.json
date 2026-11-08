@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "include": [
+    "packages/*/src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "extension/src/**/*.ts",
+    "dashboard/src/**/*.ts",
+    "dashboard/src/**/*.tsx"
+  ],
+  "exclude": ["**/node_modules/**", "**/dist/**", "packages/runtime/public/**"],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["node", "chrome"]
+  }
+}

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="UTCP Browser Session — turn your existing authenticated browser sessions into AI-callable tools">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080d19" />
+      <stop offset="1" stop-color="#101a33" />
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6" />
+      <stop offset="1" stop-color="#8b5cf6" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.15" cy="0.1" r="0.9">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.28" />
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)" />
+  <rect width="1200" height="300" fill="url(#glow)" />
+  <rect y="298" width="1200" height="2" fill="url(#brand)" opacity="0.55" />
+
+  <g transform="translate(72, 84)">
+    <rect width="132" height="132" rx="30" fill="url(#brand)" />
+    <rect x="26" y="31" width="80" height="70" rx="9" fill="#ffffff" />
+    <rect x="26" y="31" width="80" height="15" rx="7.5" fill="#111827" />
+    <rect x="35" y="59" width="44" height="8" rx="4" fill="#3b82f6" />
+    <rect x="35" y="75" width="28" height="8" rx="4" fill="#94a3b8" />
+  </g>
+
+  <text x="244" y="132" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="54" font-weight="700" fill="#e6edf7" letter-spacing="-1.2">UTCP Browser Session</text>
+
+  <text x="246" y="176" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="24" fill="#93a4c0">Turn your existing authenticated browser sessions into AI-callable tools.</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
+    <rect x="246" y="204" width="212" height="34" rx="17" fill="#111c31" stroke="#24304a" />
+    <text x="266" y="226" fill="#8fa1c0">utcp_browser_session</text>
+    <rect x="472" y="204" width="180" height="34" rx="17" fill="#111c31" stroke="#24304a" />
+    <text x="492" y="226" fill="#8fa1c0">no cookie export</text>
+    <rect x="666" y="204" width="158" height="34" rx="17" fill="#111c31" stroke="#24304a" />
+    <text x="686" y="226" fill="#8fa1c0">human approval</text>
+  </g>
+</svg>

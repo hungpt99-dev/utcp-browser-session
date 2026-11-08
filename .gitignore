@@ -1,0 +1,27 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+
+# Local runtime state: approved tools, exec history, audit log, pairing secrets.
+.data/
+.utcp-state/
+*.sqlite
+*.db
+
+# Browser profiles used by E2E runs
+test-results/
+playwright-report/
+.playwright/
+profiles/
+
+# Build output of the dashboard served by the runtime
+packages/runtime/public/
+dashboard/dist/
+extension/dist/
+
+# Local env files (never commit secrets)
+.env
+.env.local
+*.pem

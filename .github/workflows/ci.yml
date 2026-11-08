@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Typecheck, lint, unit and integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Unit, integration and security tests
+        run: npm test
+
+  build:
+    name: Build dashboard and extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Verify build artefacts
+        run: |
+          test -f dashboard/dist/index.html
+          test -f extension/dist/background.js
+          test -f extension/dist/manifest.json
+          test -f extension/dist/popup/index.html
+          node -e "const m=require('./extension/dist/manifest.json'); if(m.manifest_version!==3) process.exit(1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-dist
+          path: extension/dist
+
+  e2e:
+    name: End-to-end (real Chromium + unpacked extension)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Run the acceptance suite under a virtual display
+        run: xvfb-run -a npm run test:e2e
+      - name: Upload the JSON report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: |
+            test-results/
+            docs/screenshots/
+          if-no-files-found: warn
