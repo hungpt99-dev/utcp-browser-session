@@ -12,6 +12,11 @@ export interface RuntimeConfig {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   /** Public base URL used when the runtime builds its own links. */
   publicUrl: string;
+  /**
+   * Allow the extension to fetch a one-time pairing code over loopback.
+   * Enabled by `up`, off for a plain `serve` (the manual code flow stays).
+   */
+  autoPair: boolean;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -38,6 +43,7 @@ export function loadConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfi
     token: overrides.token ?? env.UBS_TOKEN ?? null,
     logLevel: (overrides.logLevel ?? (env.UBS_LOG_LEVEL as RuntimeConfig['logLevel']) ?? 'info'),
     publicUrl: overrides.publicUrl ?? env.UBS_PUBLIC_URL ?? `http://${host}:${port}`,
+    autoPair: overrides.autoPair ?? bool(env.UBS_AUTO_PAIR, false),
   };
 }
 

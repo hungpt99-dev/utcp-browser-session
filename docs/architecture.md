@@ -39,6 +39,28 @@ flowchart LR
     W -.->|"XHR / fetch"| T
 ```
 
+## The launcher
+
+```
+utcp-browser-session up
+   ├─ ensureBuild()          dashboard/dist, extension/dist (npm run build if missing)
+   ├─ port check             /health must not answer
+   ├─ createRuntime()        HTTP + WebSocket, tokens, store
+   ├─ store.createAutoPair() one-time record, bound to extensionIdForPath(extension/dist)
+   ├─ store.enableDomain()   only with --demo; the fixture origin, capture on
+   ├─ launchChrome()         --load-extension + a fresh --user-data-dir
+   └─ writeUpState()         <dataDir>/up.json, so `down` can find it
+```
+
+The extension does the rest on startup: `GET /api/v1/pair/auto` over loopback,
+then the same claim + signed hello it always did. `up` never touches the browser
+after launching it, and never approves anything.
+
+`--demo` also polls discovery and calls `store.generateDrafts()` when new
+endpoints appear, so the dashboard already holds a reviewable draft by the time a
+human looks. Drafts are still invisible to the manual and refused by the executor
+— the human step is approval, not generation.
+
 ## Components
 
 ### `packages/shared` — policy, not plumbing

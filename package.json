@@ -1,7 +1,7 @@
 {
   "name": "utcp-browser-session",
-  "version": "0.2.0",
-  "private": true,
+  "version": "0.3.0",
+  "private": false,
   "description": "Turn your existing authenticated browser sessions into AI-callable UTCP tools.",
   "license": "MIT",
   "type": "module",
@@ -17,7 +17,7 @@
     "extension"
   ],
   "scripts": {
-    "build": "npm run build -w @utcp-browser-session/dashboard && npm run build -w @utcp-browser-session/extension",
+    "build": "npm run build -w @utcp-browser-session/dashboard && npm run build -w @utcp-browser-session/extension && npm run build:cli",
     "build:dashboard": "npm run build -w @utcp-browser-session/dashboard",
     "build:extension": "npm run build -w @utcp-browser-session/extension",
     "typecheck": "tsc -p tsconfig.json",
@@ -37,7 +37,11 @@
     "manual:cli": "node packages/runtime/src/index.ts manual",
     "icons": "node scripts/make-icons.mjs",
     "screenshots": "node scripts/capture.mjs",
-    "verify:full": "npm run verify && xvfb-run -a npm run test:e2e"
+    "verify:full": "npm run verify && xvfb-run -a npm run test:e2e",
+    "up": "node packages/runtime/src/cli.ts up",
+    "down": "node packages/runtime/src/cli.ts down",
+    "package:extension": "node scripts/package-extension.mjs",
+    "build:cli": "node scripts/build-cli.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
@@ -48,5 +52,17 @@
     "@types/ws": "^8.18.2",
     "esbuild": "^0.28.0",
     "typescript": "^5.7.0"
-  }
+  },
+  "bin": {
+    "utcp-browser-session": "bin/utcp-browser-session.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/cli.mjs",
+    "dashboard/dist/",
+    "extension/dist/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ]
 }

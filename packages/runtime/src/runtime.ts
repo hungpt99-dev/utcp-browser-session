@@ -30,6 +30,8 @@ export interface CreateRuntimeOptions {
   dataDir?: string;
   token?: string;
   agentToken?: string;
+  /** Offer the one-time auto-pair record over loopback (set by `up`). */
+  autoPair?: boolean;
   dashboardDir?: string;
   logLevel?: LogLevel;
   quiet?: boolean;
@@ -41,6 +43,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
     host: options.host,
     dataDir: options.dataDir,
     token: options.token,
+    autoPair: options.autoPair,
     dashboardDir: options.dashboardDir,
     logLevel: options.logLevel,
   });

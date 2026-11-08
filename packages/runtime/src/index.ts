@@ -1,13 +1,10 @@
 #!/usr/bin/env node
 /**
- * CLI for the local runtime.
+ * Individual runtime commands.
  *
- *   utcp-browser-session serve            start the runtime
- *   utcp-browser-session pair             mint a one-time pairing code
- *   utcp-browser-session status           show connection + inventory
- *   utcp-browser-session tools [--all]    list tools
- *   utcp-browser-session manual           print the generated UTCP manual
- *   utcp-browser-session call <tool> '{}' invoke a tool through the runtime
+ * `up` / `down` live in `cli.ts`; this module keeps the long-standing verbs
+ * (`serve`, `pair`, `status`, `tools`, `manual`, `call`) so scripts and docs
+ * that predate the launcher keep working.
  */
 import { createRuntime } from './runtime.ts';
 import { loadConfig } from './config.ts';
@@ -17,7 +14,9 @@ function usage(): void {
   process.stdout.write(`utcp-browser-session <command>
 
 Commands:
-  serve                     Start the local runtime (default)
+  up [--demo]               Start the runtime, prepare pairing and open Chrome
+  down                      Stop a runtime started by 'up'
+  serve                     Start the local runtime only (manual pairing)
   pair                      Create a one-time pairing code for the extension
   status                    Show browser connection and inventory counters
   tools [--all]             List approved tools (or every tool with --all)
@@ -52,12 +51,10 @@ async function api(url: string, token: string, pathname: string, init: RequestIn
   return parsed;
 }
 
-async function main(): Promise<void> {
-  const [, , command = 'serve', ...rest] = process.argv;
-
+export async function runCommand(command: string, rest: string[]): Promise<number> {
   if (command === 'help' || command === '--help' || command === '-h') {
     usage();
-    return;
+    return 0;
   }
 
   if (command === 'serve') {
@@ -73,8 +70,8 @@ async function main(): Promise<void> {
         '',
         `  Dashboard   ${runtime.url}/#token=${runtime.token}`,
         '',
-        '  Next: mint a pairing code with `utcp-browser-session pair`,',
-        '  load the extension, and paste the code into its popup.',
+        '  Next: run `utcp-browser-session up` instead to get the browser and',
+        '  pairing handled for you, or mint a code with `utcp-browser-session pair`.',
         '',
       ].join('\n'),
     );
@@ -85,7 +82,8 @@ async function main(): Promise<void> {
     };
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
-    return;
+    await new Promise<void>(() => undefined);
+    return 0;
   }
 
   const config = loadConfig({});
@@ -97,13 +95,13 @@ async function main(): Promise<void> {
   if (command === 'pair') {
     const result = (await api(base, token, '/api/v1/pair/start', { method: 'POST' })) as { code: string; expiresAt: string };
     process.stdout.write(`\n  Pairing code: ${result.code}\n  Expires:      ${result.expiresAt}\n\n`);
-    return;
+    return 0;
   }
 
   if (command === 'status') {
     const status = (await api(base, token, '/api/v1/status')) as Record<string, unknown>;
     process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
-    return;
+    return 0;
   }
 
   if (command === 'tools') {
@@ -113,25 +111,25 @@ async function main(): Promise<void> {
     };
     if (!result.tools.length) {
       process.stdout.write('  No tools.\n');
-      return;
+      return 0;
     }
     for (const tool of result.tools) {
       process.stdout.write(`  ${tool.status.padEnd(9)} ${tool.permission.padEnd(12)} ${tool.fqName.padEnd(34)} ${tool.method} ${tool.pathTemplate}\n`);
     }
-    return;
+    return 0;
   }
 
   if (command === 'manual') {
     const manual = await api(base, token, '/api/v1/manual');
     process.stdout.write(`${JSON.stringify(manual, null, 2)}\n`);
-    return;
+    return 0;
   }
 
   if (command === 'call') {
     const toolName = rest[0];
     if (!toolName) {
       process.stderr.write('  Usage: utcp-browser-session call <tool> [json-args]\n');
-      process.exit(2);
+      return 2;
     }
     const args = rest[1] ? (JSON.parse(rest[1]) as Record<string, unknown>) : {};
     const confirm = rest.includes('--confirm');
@@ -140,12 +138,16 @@ async function main(): Promise<void> {
       body: JSON.stringify({ tool: toolName, args, confirm, actor: 'cli' }),
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return;
+    return 0;
   }
 
   process.stderr.write(`  Unknown command "${command}".\n`);
   usage();
-  process.exit(2);
+  return 2;
 }
 
-await main();
+// Direct execution: `node packages/runtime/src/index.ts <command>`.
+if (process.argv[1] && /(?:^|\/)index\.ts$/.test(process.argv[1])) {
+  const [, , command = 'serve', ...rest] = process.argv;
+  void runCommand(command, rest).then((code) => process.exit(code));
+}

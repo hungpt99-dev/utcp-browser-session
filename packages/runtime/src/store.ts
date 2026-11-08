@@ -64,6 +64,16 @@ export interface StateFile {
   auditHead: string;
 }
 
+/** A one-time, short-lived record that lets the extension pair without typing. */
+export interface AutoPairRecord {
+  code: string;
+  createdAt: string;
+  expiresAt: string;
+  /** Bound to the first extension that reads it, so a replay from another id fails. */
+  extensionId: string | null;
+  claimedAt: string | null;
+}
+
 export interface AuditInput {
   kind: string;
   severity: AuditSeverity;
@@ -189,6 +199,11 @@ export class Store {
   private readonly file: string;
   private readonly executions: EventLog<ExecutionRecord>;
   private readonly audits: EventLog<AuditEvent>;
+  /**
+   * Auto-pair material lives in memory only: a runtime restart invalidates it,
+   * which is the fail-closed behaviour we want for a one-time credential.
+   */
+  private autoPair: AutoPairRecord | null = null;
   private executionCache: ExecutionRecord[] = [];
   private auditCache: AuditEvent[] = [];
   private dirty = false;
@@ -865,6 +880,57 @@ export class Store {
   // -------------------------------------------------------------------------
   // Pairing / clients
   // -------------------------------------------------------------------------
+
+  /** Create (or replace) the auto-pair record. Only called when `up` is running. */
+  createAutoPair(ttlMs: number, expectedExtensionId: string | null = null): AutoPairRecord {
+    const now = Date.now();
+    this.autoPair = {
+      code: generatePairingCode(),
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + ttlMs).toISOString(),
+      // Bound at creation when the launcher knows the extension id; otherwise
+      // bound to the first caller.
+      extensionId: expectedExtensionId,
+      claimedAt: null,
+    };
+    return { ...this.autoPair };
+  }
+
+  get hasAutoPair(): boolean {
+    if (!this.autoPair) return false;
+    return new Date(this.autoPair.expiresAt).getTime() > Date.now();
+  }
+
+  /**
+   * Hand the auto-pair code to an extension, once.
+   *
+   * Refuses when the record is missing, expired, already consumed, or when a
+   * different extension id asks for a record that was already bound to one.
+   */
+  takeAutoPair(extensionId: string): { ok: true; code: string; expiresAt: string } | { ok: false; reason: string } {
+    const record = this.autoPair;
+    if (!record) return { ok: false, reason: 'No auto-pairing is pending.' };
+    if (record.claimedAt) return { ok: false, reason: 'This auto-pairing record was already used.' };
+    if (new Date(record.expiresAt).getTime() <= Date.now()) {
+      this.autoPair = null;
+      return { ok: false, reason: 'This auto-pairing record has expired.' };
+    }
+    if (record.extensionId && record.extensionId !== extensionId) {
+      // Same answer as "nothing pending": a probe cannot tell whether a record
+      // exists or which extension it belongs to.
+      return { ok: false, reason: 'No auto-pairing is pending.' };
+    }
+    record.extensionId = extensionId;
+    record.claimedAt = new Date().toISOString();
+    const code = record.code;
+    const expiresAt = record.expiresAt;
+    // The record cannot be read twice, but the code it carried still has to be
+    // claimable by /pair/claim exactly once — that is the ECDSA key exchange.
+    this.state.pairingCodes.push({ code, createdAt: record.createdAt, expiresAt, usedAt: null });
+    this.persistNow();
+    this.autoPair = null;
+    return { ok: true, code, expiresAt };
+  }
 
   createPairingCode(ttlMs: number): PairingCode {
     const now = Date.now();

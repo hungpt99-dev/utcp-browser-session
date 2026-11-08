@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.3.0 — first run in three actions
+
+The release is about the distance between `git clone` and a working tool call.
+
+### Added
+
+- **`utcp-browser-session up`** — one command that builds what is missing, starts
+  the runtime, prints both credentials and the dashboard URL, creates the pairing
+  material, and launches Chrome with the unpacked extension in a throwaway
+  profile. `up --demo` also starts the fixture site and enables it.
+- **`utcp-browser-session down`** — stops a runtime started by `up`, using a
+  pid/state file in the data directory.
+- **Auto-pairing** — the runtime issues a one-time, in-memory, loopback-only
+  pairing record bound to the extension id derived from the path `up` launched.
+  The extension claims it and completes the ECDSA handshake itself; the popup no
+  longer asks for a URL and a code. Manual pairing remains and is the fallback.
+- **Auto-generated drafts in demo mode** — as discovery lands, drafts appear in
+  the dashboard so the only remaining step is approval. Approval is never
+  automatic.
+- **Bundled CLI** — `dist/cli.mjs` via esbuild, no runtime dependencies.
+- **`npm run package:extension`** — store-ready zip, listing text and privacy
+  policy, written without an external `zip` binary.
+- **Tests** — `tests/e2e/first-run.spec.ts` (the whole three-action flow against a
+  real browser), `tests/security/auto-pair.test.ts` (replay, expiry, foreign
+  origin, foreign extension id), `tests/security/extension-invariants.test.ts`
+  (no `cookies` permission, no `document.cookie`, manual redirects, required
+  permission set).
+- **Docs** — `docs/packaging.md`, a regenerated quick start, an MP4 demo with a
+  poster replacing a 4.2 MB GIF.
+
+### Changed
+
+- `npm run build` also produces the bundled CLI.
+- The README quick start walks through three actions instead of eight steps.
+- The demo GIF is gone; `docs/screenshots/demo.mp4` (131 KB) plus
+  `demo-poster.png` replace it.
+
+### Fixed
+
+- An auto-pair code was not registered with the pairing store, so the extension
+  could fetch a code it was unable to claim.
+- `packageRoot()` resolved incorrectly in a published layout, where
+  `extension/public` is not shipped but `extension/dist` is.
+
+### Security
+
+No invariant was relaxed. The extension still requests no `cookies` permission,
+never reads `document.cookie`, keeps `redirect: 'manual'`, and drafts remain
+invisible to manuals. Auto-pairing adds a credential-free claim step; it does not
+replace or weaken the signed handshake, which still runs on every connection.
+
 All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

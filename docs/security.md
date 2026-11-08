@@ -199,6 +199,54 @@ stays inside the path.
 - The runtime is **not** a proxy: there is no route that forwards an arbitrary
   URL. The only path to a website is an approved tool on an enabled domain.
 
+## Auto-pairing
+
+`up` removes the typing, not the key exchange. The two flows differ in exactly one
+place: where the one-time code comes from.
+
+| | Manual (`serve`) | Auto (`up`) |
+| --- | --- | --- |
+| Code source | `POST /api/v1/pair/start`, printed in the terminal | `POST /api/v1/pair/auto`, read by the extension itself |
+| Transport | you copy it | loopback HTTP |
+| Lifetime | 10 min | 120 s |
+| Reusable | no | no |
+| Bound to an extension | no | yes — the id derived from the launched path |
+| Handshake | ECDSA P-256, nonce, 60 s skew | identical |
+
+### The record
+
+- **In memory only.** It is never written to `state.json`, so a runtime restart
+  invalidates it. Expiry is checked on read.
+- **Never created by `serve`.** `/api/v1/pair/auto` returns `404 policy_blocked`
+  unless the runtime was started with auto-pairing.
+- **Origin-gated.** The request must carry a `chrome-extension://` origin and
+  arrive over loopback. Anything else is `403`, and the refusal is audited without
+  consuming the record.
+- **Single use at two levels.** Reading the record deletes it (a replay is `410`),
+  and the code it hands out is a normal single-use pairing code, so `/pair/claim`
+  accepts it once.
+- **Extension-bound.** `up` computes the id Chrome will assign to the unpacked
+  bundle (`SHA-256(path)` → 16 bytes → a–p, verified against a live browser) and
+  stores it in the record. A different extension, or a local process that forges
+  the origin header, gets the same `410` as an empty slot — the response is not an
+  oracle for "a record exists, guess harder".
+
+### What it does not change
+
+- The handshake, the key material and the nonce rules are untouched.
+- The runtime still stores only the public key.
+- A paired client is still a client: it can execute approved tools, nothing else.
+- `up` stops renewing the record once any client is paired, so it cannot be used
+  to enrol a second machine silently.
+
+### Residual risks
+
+| Risk | Status |
+| --- | --- |
+| A local process takes the code before the extension does | Requires the code to be in flight during a 120 s window, and the process to already run as the user. Bounded by the in-memory record, the extension-id binding and the audit trail. |
+| A store-published extension has no path-derived id | `up` cannot bind the record; the extension falls back to manual pairing. Documented, not silently degraded. |
+| A user runs `up` on a shared box | The record is loopback-only, but another local user can reach loopback. Same trust boundary as the runtime itself (which is authenticated by token). |
+
 ## Audited events
 
 `tool.executed`, `tool.rejected`, `tool.failed`, `tool.approved`, `tool.revoked`,

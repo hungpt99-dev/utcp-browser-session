@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6.svg)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/chrome-MV3-8b5cf6.svg)](#compatibility)
 [![UTCP 1.2.0](https://img.shields.io/badge/utcp-1.2.0-22c55e.svg)](https://github.com/universal-tool-calling-protocol/typescript-utcp)
-[![Tests](https://img.shields.io/badge/tests-178%20passing-22c55e.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-193%20passing-22c55e.svg)](#development)
 [![Node 24](https://img.shields.io/badge/node-%E2%89%A522.18-339933.svg)](#quick-start)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Security](#security) · [Compatibility](#compatibility) · [Docs](#documentation) · [Roadmap](#roadmap)
@@ -31,17 +31,22 @@ UTCP client  →  utcp_browser_session  →  local runtime  →  Chrome extensio
 
 ## Demo
 
-Recorded from a real run — the fixture site, the runtime, and the unpacked
-extension, no mockups:
+Recorded from a real run — the fixture site, the runtime and the unpacked
+extension, no mockups. The popup is already paired when it opens: nobody types a
+code.
 
 <div align="center">
-  <img src="docs/screenshots/demo.gif" alt="Pairing the extension, discovering the fixture API, approving a draft tool and executing it through the dashboard" width="820" />
+
+https://github.com/hungpt99-dev/utcp-browser-session/blob/main/docs/screenshots/demo.mp4
+
+<img src="docs/screenshots/demo-poster.png" alt="The extension popup showing a connected runtime, then discovery, approval and a real tool execution in the dashboard" width="820" />
+
 </div>
 
 | | |
 | --- | --- |
 | ![Extension popup](docs/screenshots/01-extension-popup.png) | ![Dashboard overview](docs/screenshots/02-dashboard-overview.png) |
-| **Pairing and status** in the popup: connected, one approved domain capturing | **Overview** after a real run: 10 discovered APIs, 1 approved, 1 execution |
+| **Popup after `up`**: connected, paired, one origin capturing — no pairing form | **Overview** after a real run: 10 discovered APIs, 1 approved, 1 execution |
 | ![Websites](docs/screenshots/03-websites-discovery.png) | ![Tool approval](docs/screenshots/04-tool-approval.png) |
 | **Discovery**: what the extension actually saw, with permission classification | **Review**: a draft write tool with its inferred input schema |
 | ![Execution](docs/screenshots/05-tool-execution.png) | ![Inspector](docs/screenshots/06-execution-inspector.png) |
@@ -73,9 +78,11 @@ flowchart LR
     F["Page tap<br/>(opt-in, MAIN world)"] -.->|"JSON shapes, never values"| D
 ```
 
-1. **Pair once.** The popup asks for a one-time code from the runtime; the
-   extension generates an ECDSA P-256 key pair and keeps the private half. The
-   runtime stores only the public half.
+1. **Pair once — without typing.** `up` writes a one-time pairing record bound
+   to the extension id it launched; the extension claims it over loopback, then
+   the normal key exchange happens: ECDSA P-256, per-socket nonce, 60 s skew,
+   single use. The runtime stores only the public half. Auto-pairing removes the
+   *typing*, never the exchange.
 2. **Enable a site.** Exact hostname plus a pinned origin. Nothing else on the
    internet becomes reachable.
 3. **Discover.** With capture on, the extension records method, path, query names,
@@ -114,75 +121,76 @@ Everything below is implemented and covered by a test.
 
 ## Quick start
 
-Requirements: **Node ≥ 22.18** (Node 24 recommended — the packages are TypeScript
-sources run directly), **Chrome or Chromium ≥ 116**, and `xvfb` if you want the
-E2E suite on a headless box.
+**Three actions.** Install the runtime, run it, then sign in and approve — the
+last two are the product, and they are not automated away.
+
+Requirements: **Node ≥ 22.18** (Node 24 recommended — the CLI is bundled, so no
+build step is needed on the user's side), **Chrome or Chromium ≥ 116**, and a
+display (`xvfb-run` works on a headless box).
+
+### 1. Install
+
+```bash
+npm install -g utcp-browser-session
+```
+
+From a checkout, before the package is on the registry:
 
 ```bash
 git clone https://github.com/hungpt99-dev/utcp-browser-session.git
 cd utcp-browser-session
-npm install
-npm run build            # dashboard/dist + extension/dist
+npm install && npm run build && npm install -g .
 ```
 
-**1. Start the fixture website** (a local site with a login and a JSON API):
+### 2. Run
 
 ```bash
-npm run site             # http://127.0.0.1:8788
+utcp-browser-session up --demo
 ```
-
-**2. Start the runtime** in another terminal:
-
-```bash
-npm run runtime
-```
-
-It prints two credentials and a dashboard link:
 
 ```text
-  listening   http://127.0.0.1:8777
-  admin token 4f1c…   ~/.utcp-browser-session/runtime-token   (you, the dashboard)
-  agent token 9a02…   ~/.utcp-browser-session/agent-token     (what a UTCP client uses)
-  Dashboard   http://127.0.0.1:8777/#token=4f1c…
+  UTCP Browser Session
+  runtime      http://127.0.0.1:8777
+  admin token  4f1c8a2e…   ~/.utcp-browser-session/runtime-token
+  agent token  9a02d5b1…   ~/.utcp-browser-session/agent-token
+  dashboard    http://127.0.0.1:8777/#token=4f1c8a2e…
+  demo site    http://127.0.0.1:8788   (alice / correct-horse)
+  extension    nonhmljobkjipbeipekeiadlgamimjde
+
+  next: the browser opens with the extension loaded and pairs itself.
+        sign in at the demo site, click around, then approve the draft tool
+        in the dashboard. Nothing runs before you approve it.
 ```
 
-The admin token approves tools and changes policy. The agent token can only run
-approved tools, so an AI client cannot approve its own drafts. Give the agent the
-*agent* token and nothing else.
+That single command did what used to be steps 3–7 of the old quick start: it
+built the dashboard and the extension if their output was missing, started the
+runtime, wrote the two credentials, created a **one-time pairing record bound to
+that exact extension id**, and launched Chrome with `--load-extension` in a
+throwaway `--user-data-dir` (your real profile is never touched). The extension
+claimed the record over loopback and completed the ECDSA handshake by itself.
 
-**3. Load the extension**: `chrome://extensions` → Developer mode → **Load
-unpacked** → select `extension/dist`.
+`--demo` also starts the fixture site and enables it, so there is something to
+discover. Without it you get the same runtime and browser, and you enable your
+own site from the dashboard.
 
-**4. Pair**: click the extension icon, paste the runtime address
-(`http://127.0.0.1:8777`) and a pairing code:
+### 3. Sign in, then approve
 
-```bash
-npm run pair             # prints a one-time code
-```
+Sign in at <http://127.0.0.1:8788> as `alice` / `correct-horse` and click the
+fixture buttons (list, create, get, delete). The extension discovers the API and
+the dashboard fills with **draft** tools.
 
-**5. Sign in and enable the site**: open <http://127.0.0.1:8788>, sign in as
-`alice` / `correct-horse`. In the dashboard → **Websites**, enter the site URL,
-the CSRF bootstrap path `/api/csrf`, and press **Enable**. Press **Start
-discovery**.
-
-**6. Make some traffic**: click the buttons on the fixture page (list, create,
-get, delete). The endpoint table fills in.
-
-**7. Approve a tool**: **Generate drafts**, then **Tools** → pick
-`browser.create_task` → **Approve tool**.
-
-**8. Call it from a UTCP client**:
+Open the dashboard link from the banner → **Tools** → `browser.create_task` →
+**Approve tool**. Then call it:
 
 ```js
 import { createBrowserSessionClient } from '@utcp-browser-session/provider';
 
 const { client, manual } = await createBrowserSessionClient({
   runtimeUrl: 'http://127.0.0.1:8777',
-  token: process.env.UTCP_BROWSER_SESSION_TOKEN,
+  token: process.env.UTCP_BROWSER_SESSION_TOKEN,   // the *agent* token
 });
 
 console.log(manual.success);                       // true
-console.log((await client.getTools()).map(t => t.name));
 const result = await client.callTool('browser.create_task', {
   title: 'Filed by an agent',
   priority: 2,
@@ -196,6 +204,31 @@ Or from a shell:
 UTCP_BROWSER_SESSION_TOKEN=$(cat ~/.utcp-browser-session/agent-token) \
   npm run manual:cli | head -40
 ```
+
+### Stopping, and the other verbs
+
+```bash
+utcp-browser-session down     # stop the runtime `up` started
+utcp-browser-session serve    # runtime only, no browser, manual pairing
+utcp-browser-session pair     # mint a pairing code yourself
+utcp-browser-session status   # connection + inventory counters
+utcp-browser-session tools    # approved tools
+utcp-browser-session call browser.list_task '{}'
+```
+
+`up` takes `--port`, `--data-dir`, `--chrome <path>`, `--no-browser` and
+`--headless`. Exit codes are stable: `0` ok, `2` usage, `3` build failed, `4`
+port busy, `5` no browser found, `6` runtime failed.
+
+### Running from a checkout
+
+```bash
+npm install
+npm run build        # dashboard/dist, extension/dist, dist/cli.mjs
+npm run up -- --demo
+```
+
+`npm run up` is the same CLI, so a developer and a user run the same code path.
 
 ## Example: turning a local authenticated API into a UTCP tool
 
@@ -249,6 +282,11 @@ The full model is in [`docs/security.md`](docs/security.md). The short version:
   headers and a body.
 - **Pairing is a key exchange, not a shared secret.** ECDSA P-256, per-socket
   nonce, 60 s clock skew, single use. The runtime stores only the public key.
+- **Auto-pairing is a claim ticket, not a bypass.** The record is in-memory, valid
+  for 120 s, readable once, only over loopback, only with a `chrome-extension://`
+  origin, and bound to the extension id derived from the path `up` launched. It
+  is never created by `serve`. Replay, expiry and a foreign extension all return
+  the same `410` — proven in `tests/security/auto-pair.test.ts`.
 - **Exact domain allowlist.** Hostname plus pinned origin, validated again at
   execution time. No wildcards, no suffixes, no cross-domain, no scheme swap.
 - **Nothing executes without approval.** Drafts are invisible to manuals and
@@ -263,6 +301,12 @@ The full model is in [`docs/security.md`](docs/security.md). The short version:
   injected secrets.
 - **No stealth, no bypass.** CAPTCHA, MFA, bot detection and site authorisation
   are out of scope, permanently.
+
+<div align="center">
+  <img src="docs/screenshots/07-security-center.png" alt="Security centre: audit events, revoked tools, paired clients and audit-chain verification" width="820" />
+  <br/>
+  <sub><b>Security centre</b>: every approval, execution, refusal and pairing attempt, with an audit chain you can verify in one click.</sub>
+</div>
 
 What it does **not** protect against: an attacker who can already read your
 browser profile or the runtime data directory. At that point the browser itself
@@ -291,7 +335,9 @@ Details and the full table: [`docs/limitations.md`](docs/limitations.md).
 | [`docs/limitations.md`](docs/limitations.md) | Every known constraint, including unsupported sites |
 | [`docs/competitive-analysis.md`](docs/competitive-analysis.md) | Honest comparison with browser-session MCP, Web-API_Extension, Playwright MCP |
 | [`docs/audit-report.md`](docs/audit-report.md) | Architecture and security audit: findings by severity, root cause, fix, evidence |
-| [`docs/acceptance-report.md`](docs/acceptance-report.md) | AC-01…AC-19 with commands, expected/actual results and evidence |
+| [`docs/acceptance-report.md`](docs/acceptance-report.md) | AC-01…AC-22 with commands, expected/actual results and evidence |
+| [`docs/first-run-baseline.md`](docs/first-run-baseline.md) | The measured eight-step baseline this release replaced, and the three-step result |
+| [`docs/packaging.md`](docs/packaging.md) | Building the extension zip, the bundled CLI, store listing and privacy policy |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setup, conventions, how to add a capability |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability |
 
@@ -300,11 +346,13 @@ Details and the full table: [`docs/limitations.md`](docs/limitations.md).
 ```bash
 npm run typecheck        # tsc, strict, whole repo
 npm run lint             # consistency rules (console use, escape hatches, secrets)
-npm test                 # 110 unit + integration + security tests
-npm run test:e2e         # 13 Playwright tests in real Chromium (use xvfb-run on a server)
+npm test                 # unit + integration + security tests
+npm run test:e2e         # Playwright in real Chromium (use xvfb-run on a server)
 npm run bench            # performance comparison, writes docs/performance.json
-npm run build            # dashboard + extension
-npm run screenshots      # regenerate docs/screenshots and the demo GIF
+npm run build            # dashboard + extension + bundled CLI
+npm run up -- --demo     # the same first-run path a user gets
+npm run package:extension  # store-ready zip + listing + privacy policy
+npm run screenshots      # regenerate docs/screenshots and the demo MP4
 ```
 
 ```
@@ -317,9 +365,10 @@ dashboard           React + MUI dashboard served by the runtime
 tests               unit · integration · security · e2e · bench
 ```
 
-Measured on this repository's CI-sized machine: 123 tests pass, the E2E suite
-runs in ~20 s, and the UTCP stack adds roughly **20 ms p50** on loopback over a
-direct browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
+Measured on this repository's CI-sized machine: **178 package tests** and **15
+Playwright tests** pass, the E2E suite runs in 33 s (the first-run test alone in
+5.5 s), and the UTCP stack adds roughly **15 ms p50** on loopback over a direct
+browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
 
 ## Roadmap
 
@@ -339,6 +388,10 @@ direct browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
   pagination and operation-kind classification, confidence scoring
 - Correlation ids, metrics endpoint, hash-chained audit log
 - Workflow proposals from execution history (review only)
+- `utcp-browser-session up` / `down`: one command from install to a paired browser
+- Auto-pairing: one-time, loopback-only, extension-id-bound record; manual fallback
+- Bundled CLI (`dist/cli.mjs`, Node built-ins only) and a store-ready extension zip
+- First-run E2E: `up --demo` → sign in → approve → `callTool`, no manual pairing
 
 **In progress**
 
@@ -349,6 +402,9 @@ direct browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
 
 **Planned**
 
+- Publish the CLI to npm and the extension to the Chrome Web Store (the artifacts
+  are built by `npm run package:extension` and `npm pack`; the listing text and
+  privacy policy are in `dist/packages/`)
 - Firefox port (MV3 differences are non-trivial; no date)
 - Optional `chrome.debugger` mode for response bodies on sites where the page tap
   is blocked by CSP — behind an explicit, documented permission prompt

@@ -23,7 +23,14 @@ fs.mkdirSync(shots, { recursive: true });
 
 const site = createTestSite({ port: 0 });
 await site.start();
-const runtime = await createRuntime({ port: 0, dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ubs-shot-state-')), logLevel: 'error' });
+// Auto-pairing needs the address the extension already knows about (8777).
+const runtime = await createRuntime({
+  port: Number(process.env.UBS_CAPTURE_PORT ?? 8777),
+  dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ubs-shot-state-')),
+  logLevel: 'error',
+  // Screenshots follow the new first-run flow: no pairing code is typed.
+  autoPair: true,
+});
 
 const context = await chromium.launchPersistentContext(fs.mkdtempSync(path.join(os.tmpdir(), 'ubs-shot-profile-')), {
   headless: false,
@@ -61,16 +68,13 @@ async function shot(page, name) {
   console.log(`  captured ${name}`);
 }
 
-// --- 1. pair through the popup ---------------------------------------------
+// --- 1. the popup, already paired by the auto-pair record -------------------
+runtime.store.createAutoPair(120_000, extensionId);
 const popup = await context.newPage();
 await popup.setViewportSize({ width: 392, height: 620 });
 await popup.goto(`chrome-extension://${extensionId}/popup/index.html`);
-await popup.waitForSelector('input[placeholder="ABCD-2345"]');
-const { code } = (await api('/api/v1/pair/start', { method: 'POST' })).body;
-await popup.getByLabel('Runtime address').fill(runtime.url);
-await popup.getByLabel('Pairing code').fill(code);
-await popup.getByRole('button', { name: 'Pair browser' }).click();
-await popup.getByText('Connected', { exact: true }).waitFor();
+// The extension pairs itself on startup; the popup just reflects it.
+await popup.getByText('Connected', { exact: true }).waitFor({ timeout: 30_000 });
 await pause(900);
 
 // --- 2. sign in to the fixture site ----------------------------------------
@@ -160,20 +164,35 @@ await context.close();
 await runtime.close();
 await site.stop();
 
-// --- 11. GIF from the recorded session ------------------------------------
+// --- 11. MP4 + poster from the recorded session ---------------------------
+// A 4 MB GIF is a bad first impression on a slow connection; an H.264 MP4 with
+// a poster is ~10x smaller and starts instantly in the README.
 const video = fs.readdirSync(videoDir).find((file) => file.endsWith('.webm'));
 if (video) {
   const input = path.join(videoDir, video);
   console.log(`  source video: ${video} (${(fs.statSync(input).size / 1024 / 1024).toFixed(2)} MB)`);
-  const gif = path.join(shots, 'demo.gif');
-  const palette = path.join(videoDir, 'palette.png');
-  execFileSync('ffmpeg', ['-y', '-t', '34', '-i', input, '-vf', 'fps=6,scale=840:-1:flags=lanczos,palettegen=max_colors=96:stats_mode=diff', palette], { stdio: 'inherit' });
+  const mp4 = path.join(shots, 'demo.mp4');
+  const poster = path.join(shots, 'demo-poster.png');
   execFileSync(
     'ffmpeg',
-    ['-y', '-t', '34', '-i', input, '-i', palette, '-filter_complex', 'fps=6,scale=840:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=none', '-loop', '0', gif],
+    [
+      '-y', '-t', '34', '-i', input,
+      '-vf', 'scale=1280:-2:flags=lanczos,fps=24',
+      '-c:v', 'libx264', '-preset', 'slow', '-crf', '30',
+      '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an',
+      mp4,
+    ],
     { stdio: 'inherit' },
   );
-  console.log(`  captured demo.gif (${(fs.statSync(gif).size / 1024 / 1024).toFixed(2)} MB)`);
+  execFileSync('ffmpeg', ['-y', '-ss', '6', '-i', mp4, '-frames:v', '1', poster], { stdio: 'inherit' });
+  console.log(`  captured demo.mp4 (${(fs.statSync(mp4).size / 1024 / 1024).toFixed(2)} MB) + poster`);
+  for (const stale of ['demo.gif']) {
+    const file = path.join(shots, stale);
+    if (fs.existsSync(file)) {
+      fs.rmSync(file);
+      console.log(`  removed ${stale}`);
+    }
+  }
 }
 fs.rmSync(videoDir, { recursive: true, force: true });
 process.exit(0);

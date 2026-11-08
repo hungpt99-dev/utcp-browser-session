@@ -102,6 +102,23 @@ Known unsupported cases:
 - **The runtime must be running** for the provider to register a manual; the
   provider does not cache.
 
+## What still needs a human
+
+Even after `up`, these are deliberate:
+
+1. **Signing in.** The product's premise is *your* session. A login is never
+   scripted; `up --demo` only gives you a known account on a local fixture.
+2. **Approving.** Drafts are generated automatically in demo mode, but nothing
+   becomes callable until a person presses Approve. This is a credential
+   boundary (the agent holds the execute-only token), not a UI convention.
+3. **`__confirm` for destructive tools.** The caller has to pass it; the runtime
+   will not infer consent from a tool's name.
+4. **Enabling a site you care about.** `--demo` enables the fixture. Any real site
+   is enabled by you, with its exact origin; `up` does not guess.
+
+The first-run E2E (`tests/e2e/first-run.spec.ts`) performs exactly steps 1 and 2
+programmatically and nothing else.
+
 ## Known gaps in this revision
 
 - **GraphQL is classified but not executable.** The tap records the operation

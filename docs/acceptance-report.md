@@ -21,13 +21,13 @@ and its output.
 | --- | --- | --- |
 | Typecheck | `npm run typecheck` | **PASS** — `tsc -p tsconfig.json`, 0 errors, strict mode |
 | Lint | `npm run lint` | **PASS** — `lint: clean` |
-| Unit + integration + security | `npm test` | **PASS** — 164 tests, 0 failures, ~10 s |
+| Unit + integration + security | `npm test` | **PASS** — 178 tests, 0 failures, ~11 s |
 | Production build | `npm run build` | **PASS** — `dashboard/dist/index.html`, `extension/dist/{background.js,manifest.json,popup/index.html}` |
 | End-to-end | `xvfb-run -a npm run test:e2e` | **PASS** — 14 tests, 0 failures, ~19 s (includes multi-site isolation) |
 | Benchmark | `xvfb-run -a node tests/bench/benchmark.ts --requests 200` | **PASS** — 0 % error rate, `docs/performance.json` written |
 | Store writes | `node tests/bench/store-writes.ts --count 300` | **PASS** — 0.25 ms per call, `state.json` 2.5 KB |
 
-Total automated tests: **178** (85 unit + 53 integration + 26 security + 14 E2E).
+Total automated tests: **193** (85 unit + 53 integration + 40 security + 15 E2E).
 
 ## Criteria
 
@@ -288,3 +288,72 @@ Each one has a command and a real result.
 - **Actual:** exactly that; the fake extension records zero frames for every
   refused call.
 - **Evidence:** `tests/security/token-scope.test.ts`, `tests/security/ssrf.test.ts`.
+
+### AC-23 — The published package runs with no build step · PASS
+
+- **Scenario:** install the packed tarball into a throwaway prefix and run `up
+  --demo` from `/tmp`, with no checkout and no build.
+- **Command:**
+
+  ```bash
+  npm pack --pack-destination /tmp/pkg3
+  npm i -g --prefix /tmp/pkgprefix3 /tmp/pkg3/utcp-browser-session-0.3.0.tgz
+  UBS_DATA_DIR=/tmp/up4 /tmp/pkgprefix3/bin/utcp-browser-session up --demo --no-browser --port 8797
+  ```
+
+- **Expected:** the runtime, the dashboard, the demo site and both credentials
+  come up from the package alone.
+- **Actual:**
+
+  ```text
+    UTCP Browser Session
+    runtime      http://127.0.0.1:8797
+    admin token  5bd41b1c…   /tmp/up4/runtime-token
+    agent token  100bddd1…   /tmp/up4/agent-token
+    dashboard    http://127.0.0.1:8797/#token=5bd41b1c…
+    demo site    http://127.0.0.1:8788   (alice / correct-horse)
+
+    extension    enihlhakbkhbnmhiccnhflbaiokiggna
+    next: the browser opens with the extension loaded and pairs itself.
+
+  health after 317 ms
+  {"ok":true,"service":"utcp-browser-session","version":"0.3.0"}
+  demo 200
+  ```
+
+- **Evidence:** `dist/packages` is not needed for this; the bundle is 526 KiB and
+  the tarball is 3.0 MB.
+
+### AC-24 — The three actions, against a real browser · PASS
+
+- **Scenario:** `up --demo` with a real Chromium, the unpacked extension, a real
+  sign-in, a real approval, a real `callTool`.
+- **Command:** `xvfb-run -a npx playwright test -c tests/e2e/playwright.config.ts first-run.spec.ts`
+- **Expected:** the extension pairs with no code typed; a draft appears after
+  sign-in; the draft is not callable; approval makes it callable; the call
+  returns the website's 201; the record is then gone.
+- **Actual:** `✓ up --demo reaches a tool call with no manual pairing (5.5s)`, and
+  the audit log contains `pair.auto_issued` and `pair.claimed`.
+- **Evidence:** `tests/e2e/first-run.spec.ts`. The same run asserts `410` on a
+  replay and `403` for a non-extension origin.
+
+### AC-25 — Auto-pairing fails closed · PASS
+
+- **Scenario:** no auto-pair (plain `serve`), foreign origin, replay, expiry, a
+  different extension id.
+- **Command:** `node --test tests/security/auto-pair.test.ts`
+- **Expected:** `404`, `403`, `410`, `410`, `410` — and the record survives a
+  rejected probe.
+- **Actual:** 7 tests, 7 pass, 0 fail.
+- **Evidence:** `tests/security/auto-pair.test.ts`.
+
+### AC-26 — The security invariants are pinned in tests · PASS
+
+- **Scenario:** the manifest, the extension sources and the runtime sources.
+- **Command:** `node --test tests/security/extension-invariants.test.ts`
+- **Expected:** no `cookies` permission anywhere; no `document.cookie` or
+  `chrome.cookies`; `credentials: 'include'` present; `redirect: 'manual'`
+  present; the permission set is exactly `storage`, `webRequest`, `scripting`,
+  `activeTab`, `alarms`.
+- **Actual:** 6 tests, 6 pass, 0 fail.
+- **Evidence:** `tests/security/extension-invariants.test.ts`.

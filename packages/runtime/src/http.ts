@@ -27,6 +27,7 @@ import {
   type DomainRecord,
   type ExecutionEnvelope,
 } from '@utcp-browser-session/shared';
+import { VERSION } from './version.ts';
 import type { RuntimeConfig } from './config.ts';
 import type { Store } from './store.ts';
 import type { ExtensionHub } from './connections.ts';
@@ -185,7 +186,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
 
     // --- unauthenticated, side-effect free ---------------------------------
     if (pathname === '/health') {
-      json(res, 200, { ok: true, service: 'utcp-browser-session', version: '0.2.0' });
+      json(res, 200, { ok: true, service: 'utcp-browser-session', version: VERSION });
       return;
     }
 
@@ -246,6 +247,48 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       return;
     }
 
+    /**
+     * Auto-pairing: the extension asks for the one-time code instead of the
+     * human copying it. Only available when the runtime was started by `up`,
+     * and only over loopback with a chrome-extension Origin.
+     *
+     * The code is a *claim ticket*, not a session: the extension still generates
+     * its key pair and the runtime still requires the signed, nonce-bound
+     * handshake before any frame is accepted.
+     */
+    if (pathname === '/api/v1/pair/auto') {
+      const origin = extensionOrigin(req);
+      if (method === 'OPTIONS') {
+        res.writeHead(204, origin ? { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type', vary: 'origin' } : {});
+        res.end();
+        return;
+      }
+      if (method !== 'POST') throw new HttpError(405, ErrorCode.INVALID_REQUEST, 'POST required.');
+      if (!config.autoPair) throw new HttpError(404, ErrorCode.POLICY_BLOCKED, 'Auto-pairing is not enabled on this runtime.');
+      if (!origin) throw new HttpError(403, ErrorCode.ORIGIN_NOT_ALLOWED, 'Auto-pairing is only available to a Chrome extension origin.');
+      const extensionId = origin.replace('chrome-extension://', '');
+      const verdict = store.takeAutoPair(extensionId);
+      if (!verdict.ok) {
+        store.audit({
+          kind: 'pair.auto_rejected',
+          severity: 'warn',
+          actor: 'extension',
+          message: `Auto-pairing refused: ${verdict.reason}`,
+          detail: { extensionId },
+        });
+        throw new HttpError(410, ErrorCode.PAIRING_INVALID, verdict.reason);
+      }
+      store.audit({
+        kind: 'pair.auto_issued',
+        severity: 'info',
+        actor: 'extension',
+        message: 'An auto-pairing code was handed to the extension.',
+        detail: { extensionId },
+      });
+      json(res, 200, { code: verdict.code, expiresAt: verdict.expiresAt }, { 'access-control-allow-origin': origin, vary: 'origin' });
+      return;
+    }
+
     // --- everything else needs a credential --------------------------------
     if (pathname.startsWith('/api/')) {
       const scopes = scopesOf(req);
@@ -268,7 +311,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       json(res, 200, {
         ok: true,
         runtimeId: store.runtimeId,
-        version: '0.2.0',
+        version: VERSION,
         connection: hub.status(),
         stats: store.stats(),
         settings: store.settings,

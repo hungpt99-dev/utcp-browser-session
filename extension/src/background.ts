@@ -158,6 +158,47 @@ function scheduleReconnect(): void {
   }, delay);
 }
 
+/**
+ * Auto-pairing.
+ *
+ * The runtime started by `up` keeps a one-time pairing code for a couple of
+ * minutes. If this browser has never been paired, ask for it and run the normal
+ * claim + signed handshake. Nothing about the key exchange changes: this only
+ * removes the typing. If the record is missing, expired or the runtime does not
+ * offer the endpoint, the popup's manual flow is still there.
+ */
+let autoPairAttempts = 0;
+
+async function tryAutoPair(): Promise<boolean> {
+  if (autoPairAttempts >= 3) return false;
+  const current = await state();
+  if (isPaired(current)) return false;
+  const base = current.runtimeUrl.replace(/\/$/, '');
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(base)) return false;
+  autoPairAttempts += 1;
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api/v1/pair/auto`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+  } catch {
+    return false;
+  }
+  if (!response.ok) return false;
+  const payload = (await response.json().catch(() => ({}))) as { code?: string };
+  if (!payload.code) return false;
+  const result = await pair(base, payload.code);
+  return result.ok;
+}
+
+/** Startup path: auto-pair if we can, otherwise just connect. */
+async function bootstrap(): Promise<void> {
+  if (await tryAutoPair()) return;
+  await connect();
+}
+
 async function connect(): Promise<void> {
   const current = await state();
   if (!isPaired(current) || socket) return;
@@ -841,16 +882,16 @@ chrome.runtime.onSuspend.addListener(() => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  void chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
-  void connect();
+  void chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+  void bootstrap();
 });
 chrome.runtime.onStartup.addListener(() => {
-  void chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
-  void connect();
+  void chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+  void bootstrap();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM_NAME) return;
-  if (!connected && !socket) void connect();
+  if (!connected && !socket) void bootstrap();
 });
 chrome.permissions.onAdded.addListener(() => {
   void refreshWebRequestListeners();

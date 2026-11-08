@@ -27,7 +27,8 @@ extension into Chromium, then drives the product through the UI:
 | `05-tool-execution.png` | The same tool approved and executed from the inspector |
 | `06-execution-inspector.png` | Execution record: sanitized metadata and redacted preview |
 | `07-security-center.png` | Audit trail, paired browsers, revoked tools |
-| `demo.gif` | 34 s recording of the workflow above |
+| `demo.mp4` | 34 s recording of the workflow above (131 KB, H.264) |
+| `demo-poster.png` | First frame of `demo.mp4`, used as the README poster |
 
 These are not mockups. The runtime is local, the data comes from the fixture
 site, and the JSON in the inspector is the real response.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UTCP Browser Session",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Turns your existing signed-in browser sessions into approved, auditable UTCP tools.",
   "minimum_chrome_version": "116",
   "background": {
@@ -22,20 +22,41 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "permissions": ["storage", "webRequest", "scripting", "alarms", "activeTab"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
-  "optional_host_permissions": ["https://*/*"],
+  "permissions": [
+    "storage",
+    "webRequest",
+    "scripting",
+    "alarms",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
-      "js": ["tap.js"],
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "tap.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     },
     {
-      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
-      "js": ["bridge.js"],
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": false
