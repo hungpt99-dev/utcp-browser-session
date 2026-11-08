@@ -22,6 +22,7 @@ import DashboardIcon from '@mui/icons-material/SpaceDashboardOutlined';
 import LanguageIcon from '@mui/icons-material/LanguageOutlined';
 import HandymanIcon from '@mui/icons-material/HandymanOutlined';
 import PlayIcon from '@mui/icons-material/PlayCircleOutline';
+import RouteIcon from '@mui/icons-material/AltRouteOutlined';
 import ShieldIcon from '@mui/icons-material/ShieldOutlined';
 import SettingsIcon from '@mui/icons-material/TuneOutlined';
 import { Api, ApiError, type RuntimeStatus } from './api.ts';
@@ -30,6 +31,7 @@ import Overview from './views/Overview.tsx';
 import Websites from './views/Websites.tsx';
 import Tools from './views/Tools.tsx';
 import Executions from './views/Executions.tsx';
+import Workflows from './views/Workflows.tsx';
 import Security from './views/Security.tsx';
 import Settings from './views/Settings.tsx';
 
@@ -37,6 +39,7 @@ const NAV = [
   { id: 'overview', label: 'Overview', icon: <DashboardIcon fontSize="small" /> },
   { id: 'websites', label: 'Websites', icon: <LanguageIcon fontSize="small" /> },
   { id: 'tools', label: 'Tools', icon: <HandymanIcon fontSize="small" /> },
+  { id: 'workflows', label: 'Workflows', icon: <RouteIcon fontSize="small" /> },
   { id: 'executions', label: 'Executions', icon: <PlayIcon fontSize="small" /> },
   { id: 'security', label: 'Security', icon: <ShieldIcon fontSize="small" /> },
   { id: 'settings', label: 'Settings', icon: <SettingsIcon fontSize="small" /> },
@@ -44,15 +47,23 @@ const NAV = [
 
 type ViewId = (typeof NAV)[number]['id'];
 
+/**
+ * The bootstrap token is read from the URL *fragment* first: a fragment is never
+ * sent to the server, never lands in the Referer header and never appears in the
+ * runtime's request log. `?token=` is still accepted for older links.
+ */
 function readBootstrapToken(): string {
+  const hash = window.location.hash.replace(/^#/, '');
+  const fromHash = hash ? new URLSearchParams(hash).get('token') : null;
   const params = new URLSearchParams(window.location.search);
-  const fromUrl = params.get('token');
-  if (fromUrl) {
-    window.localStorage.setItem('ubs.token', fromUrl);
+  const fromQuery = params.get('token');
+  const token = fromHash ?? fromQuery;
+  if (token) {
+    window.localStorage.setItem('ubs.token', token);
     params.delete('token');
     const query = params.toString();
     window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}`);
-    return fromUrl;
+    return token;
   }
   return window.localStorage.getItem('ubs.token') ?? '';
 }
@@ -261,6 +272,8 @@ export default function App() {
               <Websites api={api} status={status} onChanged={bump} />
             ) : view === 'tools' ? (
               <Tools api={api} initialToolId={selectedToolId} onChanged={bump} />
+            ) : view === 'workflows' ? (
+              <Workflows api={api} />
             ) : view === 'executions' ? (
               <Executions api={api} />
             ) : view === 'security' ? (

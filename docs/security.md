@@ -105,13 +105,28 @@ stays inside the path.
 - `approved` requires an authenticated action and an enabled domain.
 - Disabling a domain revokes its tools.
 - `revoked` tools are refused and never appear in a manual.
-- Classification: `GET/HEAD/OPTIONS → READ`, `DELETE → DESTRUCTIVE`,
-  `POST/PUT/PATCH → WRITE` unless the path matches a destructive verb
-  (`delete`, `destroy`, `remove`, `purge`, `drop`, `revoke`, `terminate`,
-  `wipe`, `reset`, `archive`, `deactivate`, `disable`). An unknown method is
-  classified `WRITE` **and** flagged `reviewRequired`.
+- **Classification is evidence-based, never method-only.** The path is split into
+  segments and checked for a destructive verb (`delete`, `destroy`, `remove`,
+  `purge`, `drop`, `revoke`, `terminate`, `wipe`, `reset`, `archive`,
+  `deactivate`, `suspend`, `unlink`, `detach`), a read verb (`get`, `list`,
+  `search`, `query`, …) or a write verb (`create`, `update`, `approve`, …);
+  GraphQL operations are classified by their operation name; an observed body and
+  the response shape contribute. The method only corroborates. Consequences:
+  `GET /tasks/1/delete` is **DESTRUCTIVE**, `POST /search` with a body is
+  **READ**, `GET /api/tasks` is **READ**. Anything unrecognised stays `WRITE`
+  **and** `reviewRequired`.
+- **The permission used at execution is the stored one**, clamped by the domain
+  policy — never recomputed at call time from the method, so a caller cannot
+  argue its way past a reviewed classification.
+- **A domain ceiling** (`READ` / `WRITE` / `DESTRUCTIVE`) and optional
+  `confirmWrites` are enforced before dispatch. A tool above the ceiling is
+  refused with `policy_blocked`; it is *not* silently relabelled (a WRITE
+  relabelled READ would still mutate the site while claiming to be safe).
+- `blockedPathPrefixes` keeps whole areas (`/admin`) out of draft generation.
 - `DESTRUCTIVE` requires `__confirm: true` on the call. The flag is stripped
   before the request is built, so it can never reach a website.
+- **Nobody can change policy through the manual.** Tools only execute; policy
+  mutation requires the runtime bearer token and is not part of the UTCP surface.
 
 ### Request and response limits
 
@@ -124,6 +139,9 @@ stays inside the path.
 | Timeout | 30 s default (1–120 s) | Extension `AbortController` + runtime timer |
 | Redirects | 2 | Runtime |
 | Rate | 60 calls/min/tool (configurable ≤ 600) | Runtime sliding window |
+| Concurrency | 8 in flight (1–32) | Runtime semaphore |
+| Queue | 32 waiting calls, then `busy` | Runtime bounded queue |
+| Cancellation | on client disconnect | HTTP `close` → `cancel` frame → extension `abort` |
 
 ### Credential hygiene
 
@@ -161,9 +179,16 @@ stays inside the path.
 `extension.connected`, `extension.disconnected`, `extension.handshake_rejected`,
 `request.redirect_blocked`.
 
-Each event stores: timestamp, kind, severity, actor, domain, tool name, a short
-message and a redacted detail object. A security test scans the whole audit log
-for the injected secrets.
+Each event stores: timestamp, kind, severity, actor, origin, tool name,
+correlation id, a short message and a redacted detail object. A security test
+scans the whole audit log for the injected secrets.
+
+**Tamper evidence.** Every event hashes `prevHash` plus its own fields
+(SHA-256), forming a chain that survives restarts (the head is stored in the
+state document). `GET /api/v1/audit/verify` recomputes the chain over the events
+on disk and names the first entry that does not match. Editing or reordering the
+log is therefore visible — it does not prevent a local attacker from deleting the
+whole file, which is documented below.
 
 ## Residual risks
 
@@ -174,9 +199,11 @@ for the injected secrets.
    nonces (not the private key) and then request executions for enabled domains.
    This requires the attacker to already run code as the user. The extension
    refuses non-loopback runtime URLs, which limits the blast radius.
-3. **Schema inference is structural.** A site could return a field it never
-   returns again; the merged schema widens and a required field may be
-   over-reports. Tools are drafts until a human checks the shape.
+3. **Schema inference is structural.** A field is only marked `required` when
+   every observation carried it, and nothing is required from a single sample,
+   but a site with unstable responses can still produce a schema that is too
+   narrow for a rare payload. Tools stay drafts until a human checks the shape,
+   and low-confidence tools are flagged `reviewRequired`.
 4. **`Origin` is attacker-controlled by the page, not by the extension.** An
    extension-originated POST carries `Origin: chrome-extension://…`; a site that
    requires a same-origin `Origin` cannot be called at all (see limitations).
@@ -184,3 +211,10 @@ for the injected secrets.
    binds them to a nonce the extension cannot see, writes will fail with the
    site's own error. Nothing is bypassed.
 6. **Zod advisory.** See `SECURITY.md`; mitigated by hard size caps.
+7. **The audit log is tamper-*evident*, not tamper-proof.** A local attacker who
+   can write `~/.utcp-browser-session` can delete the log or forge a consistent
+   chain from scratch. Ship the log elsewhere if you need assurance against that.
+8. **The extension is the trust boundary.** Any code that can drive the paired
+   extension can act as the user on the origins it was granted. That is why the
+   allowlist is explicit, per-origin and revocable, and why every execution is
+   audited with a correlation id.

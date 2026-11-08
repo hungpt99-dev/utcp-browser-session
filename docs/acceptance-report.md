@@ -21,12 +21,13 @@ and its output.
 | --- | --- | --- |
 | Typecheck | `npm run typecheck` | **PASS** — `tsc -p tsconfig.json`, 0 errors, strict mode |
 | Lint | `npm run lint` | **PASS** — `lint: clean` |
-| Unit + integration + security | `npm test` | **PASS** — 110 tests, 0 failures, ~7 s |
+| Unit + integration + security | `npm test` | **PASS** — 151 tests, 0 failures, ~9 s |
 | Production build | `npm run build` | **PASS** — `dashboard/dist/index.html`, `extension/dist/{background.js,manifest.json,popup/index.html}` |
-| End-to-end | `xvfb-run -a npm run test:e2e` | **PASS** — 13 tests, 0 failures, ~15–20 s |
+| End-to-end | `xvfb-run -a npm run test:e2e` | **PASS** — 14 tests, 0 failures, ~19 s (includes multi-site isolation) |
 | Benchmark | `xvfb-run -a node tests/bench/benchmark.ts --requests 200` | **PASS** — 0 % error rate, `docs/performance.json` written |
+| Store writes | `node tests/bench/store-writes.ts --count 300` | **PASS** — 0.25 ms per call, `state.json` 2.5 KB |
 
-Total automated tests: **123** (110 + 13).
+Total automated tests: **165** (84 unit + 53 integration + 14 security + 14 E2E).
 
 ## Criteria
 
@@ -157,3 +158,97 @@ See `docs/performance.md` and `docs/performance.json` for the raw data.
    `SECURITY.md`.
 8. **The E2E suite requires a display.** It runs under `xvfb-run` here and in CI;
    `npm run verify:full` encodes that.
+
+## Added after the audit
+
+These criteria cover the defects found by the audit (`docs/audit-report.md`).
+Each one has a command and a real result.
+
+### AC-12 — Per-origin isolation · PASS
+
+- **Scenario:** two applications on the same host (`127.0.0.1`) on different
+  ports; enable both, discover on both, approve tools for both, call both, then
+  revoke one.
+- **Command:** `node --test tests/integration/isolation.test.ts` and
+  `xvfb-run -a npx playwright test -c tests/e2e/playwright.config.ts multidomain.spec.ts`
+- **Expected:** separate records, tools bound to their own origin, correct
+  dispatch target, independent revocation and session state.
+- **Actual:** `9/9` integration tests pass (records, endpoints, tools, dispatch,
+  session state, revocation, refusal before dispatch, policy ceiling, blocked
+  paths). The E2E test signs in to one site as `alice` and the other as `root`,
+  calls each origin's `session` tool and receives the matching identity; A's call
+  adds zero requests to B's log; revoking A revokes only A's tools and B still
+  answers; A is then refused with no request reaching the server.
+- **Evidence:** `tests/integration/isolation.test.ts`, `tests/e2e/multidomain.spec.ts`,
+  `test-results/e2e-results.json`.
+
+### AC-13 — Bounded concurrency and cancellation · PASS
+
+- **Scenario:** 5 simultaneous calls with `maxInFlight: 2`, `maxQueue: 2`; then a
+  call whose HTTP client disconnects mid-flight.
+- **Command:** `node --test tests/integration/concurrency.test.ts`
+- **Expected:** 2 run, 2 queue, 1 rejected with `busy`, peak concurrency 2, queue
+  drains; the disconnect cancels the browser call and the hub stays usable.
+- **Actual:** exactly that; `peak = 2`, `callsQueued = 2`,
+  `callsRejectedBusy = 1`, `queued = 0` afterwards, `cancellations >= 1`, and the
+  next call succeeds.
+- **Evidence:** `tests/integration/concurrency.test.ts`.
+
+### AC-14 — Popup actions actually act · PASS
+
+- **Scenario:** send the popup's `intent` frames over the authenticated socket.
+- **Command:** `node --test tests/integration/intents.test.ts`
+- **Expected:** `enable_origin` enables and re-syncs, `discovery_start/stop`
+  toggles capture, unenabled and non-http origins are refused, every action is
+  audited.
+- **Actual:** 5/5 pass; the audit contains `domain.enabled` with the origin, and
+  `file://` is ignored entirely.
+- **Evidence:** `tests/integration/intents.test.ts`.
+
+### AC-15 — Evidence-based classification · PASS
+
+- **Scenario:** classify `GET /tasks/1/delete`, `POST /search`, GraphQL
+  `DeleteIssue`, `UpdateIssue`, `GetIssue`.
+- **Command:** `node --test tests/unit/permissions.test.ts`
+- **Expected:** the path and the operation name win over the verb.
+- **Actual:** `DESTRUCTIVE`, `READ`, `DESTRUCTIVE`, `WRITE`, `READ` respectively;
+  each result carries the signals it used.
+- **Evidence:** `tests/unit/permissions.test.ts`.
+
+### AC-16 — Schema inference quality · PASS
+
+- **Scenario:** fold several observations of the same endpoint.
+- **Command:** `node --test tests/unit/inference.test.ts`
+- **Expected:** required only when always present (and only after 2 samples),
+  nullable preserved, unions preserved, enums from small value sets, pagination
+  and operation kinds detected.
+- **Actual:** 14/14 pass.
+- **Evidence:** `tests/unit/inference.test.ts`.
+
+### AC-17 — Audit tamper evidence · PASS
+
+- **Scenario:** write events, verify, edit one line on disk, verify again.
+- **Command:** `node --test tests/unit/audit-chain.test.ts`
+- **Expected:** intact chain verifies; a modified entry is reported with its id.
+- **Actual:** 3/3 pass, `ok: false` with the tampered entry named.
+- **Evidence:** `tests/unit/audit-chain.test.ts`.
+
+### AC-18 — Workflow proposals · PASS
+
+- **Scenario:** record the same two-tool sequence twice, then once with a 10
+  minute gap; include a destructive step.
+- **Command:** `node --test tests/unit/workflows.test.ts`
+- **Expected:** a proposal only after two occurrences; no proposal across a
+  session gap; destructive steps flagged; bindings inferred only when the field
+  exists in the earlier response schema.
+- **Actual:** 3/3 pass; proposals are always `status: draft`.
+- **Evidence:** `tests/unit/workflows.test.ts`.
+
+### AC-19 — Persistence cost · PASS
+
+- **Scenario:** 300 tool calls' worth of store mutations.
+- **Command:** `node tests/bench/store-writes.ts --count 300`
+- **Expected:** no full-document rewrite on the hot path.
+- **Actual:** 76 ms total, **0.25 ms per call**, `state.json` 2.5 KB (was
+  1 916 ms / 6.39 ms / 229 KB).
+- **Evidence:** `docs/performance.md`, `docs/audit-report.md` §4.

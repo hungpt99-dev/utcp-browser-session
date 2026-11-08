@@ -10,6 +10,10 @@
  * The nonce is generated per socket and consumed once, so a captured handshake
  * cannot be replayed. The runtime never holds a secret that could impersonate
  * the browser: only the public key.
+ *
+ * Concurrency: the browser is a shared, single-threaded resource, so calls are
+ * bounded. Beyond `maxInFlight` they queue (bounded by `maxQueue`), and beyond
+ * that the runtime answers `busy` instead of buffering without limit.
  */
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage } from 'node:http';
@@ -23,6 +27,7 @@ import {
   ToolError,
   type EndpointObservation,
   type ExecuteMessage,
+  type ExtensionMessage,
   type ResultMessage,
 } from '@utcp-browser-session/shared';
 import type { Store } from './store.ts';
@@ -30,12 +35,20 @@ import type { Logger } from './logger.ts';
 
 const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/([a-p]{32})$/;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+const METRIC_WINDOW = 500;
 
 interface Pending {
   resolve: (value: ResultMessage) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
   startedAt: number;
+}
+
+interface Queued {
+  message: ExecuteMessage;
+  resolve: (value: ResultMessage) => void;
+  reject: (error: Error) => void;
+  enqueuedAt: number;
 }
 
 export interface ActiveConnection {
@@ -47,6 +60,29 @@ export interface ActiveConnection {
   lastMessageAt: number;
 }
 
+/** Bounded sample window with percentile helpers. */
+class Samples {
+  private readonly values: number[] = [];
+
+  add(value: number): void {
+    this.values.push(value);
+    if (this.values.length > METRIC_WINDOW) this.values.shift();
+  }
+
+  summary(): { count: number; p50: number; p95: number; p99: number; max: number } {
+    if (this.values.length === 0) return { count: 0, p50: 0, p95: 0, p99: 0, max: 0 };
+    const sorted = [...this.values].sort((a, b) => a - b);
+    const at = (p: number): number => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
+    return {
+      count: sorted.length,
+      p50: Math.round(at(50) * 100) / 100,
+      p95: Math.round(at(95) * 100) / 100,
+      p99: Math.round(at(99) * 100) / 100,
+      max: Math.round(sorted[sorted.length - 1] * 100) / 100,
+    };
+  }
+}
+
 export class ExtensionHub extends EventEmitter {
   private readonly wss: WebSocketServer;
   private readonly store: Store;
@@ -54,9 +90,22 @@ export class ExtensionHub extends EventEmitter {
   private connection: ActiveConnection | null = null;
   private socket: WebSocket | null = null;
   private readonly pending = new Map<string, Pending>();
+  private readonly queue: Queued[] = [];
+  private inFlight = 0;
   private heartbeat: NodeJS.Timeout | null = null;
+  private readonly browserLatency = new Samples();
+  private readonly queueWait = new Samples();
   /** Counters used by the dashboard and by tests to prove data actually flowed. */
-  readonly counters = { discoveryFrames: 0, observationsIngested: 0, observationsDropped: 0, resultsReceived: 0 };
+  readonly counters = {
+    discoveryFrames: 0,
+    observationsIngested: 0,
+    observationsDropped: 0,
+    resultsReceived: 0,
+    callsQueued: 0,
+    callsRejectedBusy: 0,
+    cancellations: 0,
+    sessionExpiredReports: 0,
+  };
 
   constructor(store: Store, logger: Logger) {
     super();
@@ -153,8 +202,6 @@ export class ExtensionHub extends EventEmitter {
               kind: 'extension.handshake_rejected',
               severity: 'warn',
               actor: 'extension',
-              domain: null,
-              toolName: null,
               message: `Rejected extension handshake: ${verdict.code}`,
             });
             ws.close(4401, 'unauthorized');
@@ -183,7 +230,7 @@ export class ExtensionHub extends EventEmitter {
   }
 
   private async verifyHello(
-    message: Extract<import('@utcp-browser-session/shared').ExtensionMessage, { type: 'hello' }>,
+    message: Extract<ExtensionMessage, { type: 'hello' }>,
     expectedNonce: string,
     extensionId: string,
     origin: string,
@@ -239,7 +286,7 @@ export class ExtensionHub extends EventEmitter {
       label,
       extensionId,
       connectedAt: new Date().toISOString(),
-      capturing: new Set(),
+      capturing: new Set(this.store.listDomains().filter((domain) => domain.enabled && domain.deepCapture).map((domain) => domain.origin)),
       lastMessageAt: Date.now(),
     };
     this.store.touchClient(clientId);
@@ -247,8 +294,6 @@ export class ExtensionHub extends EventEmitter {
       kind: 'extension.connected',
       severity: 'info',
       actor: 'extension',
-      domain: null,
-      toolName: null,
       message: `Browser extension "${label}" connected.`,
     });
     this.logger.info('extension.connected', { clientId, label });
@@ -258,18 +303,21 @@ export class ExtensionHub extends EventEmitter {
     const previous = this.connection;
     this.connection = null;
     this.socket = null;
+    this.inFlight = 0;
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(new ToolError(ErrorCode.EXTENSION_DISCONNECTED, 'The browser extension disconnected before answering.'));
       this.pending.delete(id);
+    }
+    while (this.queue.length > 0) {
+      const queued = this.queue.shift()!;
+      queued.reject(new ToolError(ErrorCode.EXTENSION_DISCONNECTED, 'The browser extension disconnected while this call was queued.'));
     }
     if (previous) {
       this.store.audit({
         kind: 'extension.disconnected',
         severity: 'warn',
         actor: 'extension',
-        domain: null,
-        toolName: null,
         message: `Browser extension disconnected (${reason}).`,
       });
       this.logger.info('extension.disconnected', { reason });
@@ -277,7 +325,7 @@ export class ExtensionHub extends EventEmitter {
     }
   }
 
-  private dispatch(message: import('@utcp-browser-session/shared').ExtensionMessage): void {
+  private dispatch(message: ExtensionMessage): void {
     if (this.connection) this.connection.lastMessageAt = Date.now();
     switch (message.type) {
       case 'result': {
@@ -285,6 +333,8 @@ export class ExtensionHub extends EventEmitter {
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
+        this.counters.resultsReceived += 1;
+        this.browserLatency.add(message.latencyMs);
         pending.resolve(message);
         return;
       }
@@ -296,6 +346,14 @@ export class ExtensionHub extends EventEmitter {
         if (this.connection) this.connection.capturing = new Set(message.capturing);
         return;
       }
+      case 'session': {
+        this.onSession(message);
+        return;
+      }
+      case 'intent': {
+        this.onIntent(message);
+        return;
+      }
       case 'pong':
         return;
       default:
@@ -303,28 +361,145 @@ export class ExtensionHub extends EventEmitter {
     }
   }
 
+  private onSession(message: Extract<ExtensionMessage, { type: 'session' }>): void {
+    this.store.setSession(message.origin, message.status, message.httpStatus, message.status === 'expired' ? ErrorCode.WEBSITE_AUTH_EXPIRED : null);
+    if (message.status === 'expired' && this.store.getDomain(message.origin)?.enabled) {
+      this.counters.sessionExpiredReports += 1;
+      this.store.audit({
+        kind: 'session.expired',
+        severity: 'warn',
+        actor: 'extension',
+        origin: message.origin,
+        message: `The extension observed HTTP ${message.httpStatus} for ${message.origin}; the session looks expired.`,
+      });
+      this.logger.warn('session.expired', { origin: message.origin, httpStatus: message.httpStatus });
+    }
+  }
+
+  /**
+   * Actions the human took in the extension popup. The popup never holds the
+   * runtime token, so it asks its own authenticated socket instead. Only the
+   * paired browser can reach this path, and every action is audited.
+   */
+  private onIntent(message: Extract<ExtensionMessage, { type: 'intent' }>): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(message.origin);
+    } catch {
+      this.logger.warn('intent.rejected', { reason: 'invalid_origin' });
+      return;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+
+    const origin = parsed.origin;
+    switch (message.action) {
+      case 'enable_origin': {
+        this.store.enableDomain(origin, parsed.hostname, { deepCapture: message.deepCapture ?? false });
+        this.store.audit({
+          kind: 'domain.enabled',
+          severity: 'info',
+          actor: 'extension',
+          origin,
+          message: `Enabled ${origin} from the extension popup.`,
+        });
+        this.sync();
+        return;
+      }
+      case 'disable_origin': {
+        this.store.disableDomain(origin);
+        this.store.audit({
+          kind: 'domain.disabled',
+          severity: 'warn',
+          actor: 'extension',
+          origin,
+          message: `Disabled ${origin} and revoked its tools from the extension popup.`,
+        });
+        this.sync();
+        return;
+      }
+      case 'discovery_start': {
+        if (!this.store.isDomainEnabled(origin)) {
+          this.logger.warn('intent.rejected', { reason: 'origin_not_enabled', origin });
+          return;
+        }
+        this.startDiscovery(origin, parsed.hostname, message.deepCapture ?? false);
+        return;
+      }
+      case 'discovery_stop': {
+        this.stopDiscovery(origin);
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
   private ingestDiscovery(events: EndpointObservation[]): void {
     this.counters.discoveryFrames += 1;
+    const byOrigin = new Map<string, EndpointObservation[]>();
     for (const event of events) {
-      if (!this.store.isDomainEnabled(event.domain)) {
+      const capturing = this.connection?.capturing.has(event.origin) ?? false;
+      if (!capturing || !this.store.isDomainEnabled(event.origin)) {
         this.counters.observationsDropped += 1;
         continue;
       }
-      if (this.connection && !this.connection.capturing.has(event.domain)) {
-        this.counters.observationsDropped += 1;
-        continue;
-      }
-      this.store.recordObservation(event);
-      this.counters.observationsIngested += 1;
+      const bucket = byOrigin.get(event.origin) ?? [];
+      bucket.push(event);
+      byOrigin.set(event.origin, bucket);
+    }
+    for (const bucket of byOrigin.values()) {
+      const ingested = this.store.recordObservations(bucket);
+      this.counters.observationsIngested += ingested;
     }
   }
 
   /** Send an execute frame and await its correlated result. */
   async execute(message: ExecuteMessage): Promise<ResultMessage> {
     if (!this.socket || !this.connection) {
-      throw new ToolError(ErrorCode.EXTENSION_DISCONNECTED, 'No browser is connected to the runtime.', {
+      throw new ToolError(ErrorCode.NO_BROWSER, 'No browser is connected to the runtime.', {
         hint: 'Open Chrome with the extension installed, then pair or reconnect it.',
       });
+    }
+    const maxInFlight = this.store.settings.maxInFlight;
+    if (this.inFlight < maxInFlight) return this.send(message);
+
+    if (this.queue.length >= this.store.settings.maxQueue) {
+      this.counters.callsRejectedBusy += 1;
+      throw new ToolError(ErrorCode.BUSY, 'The browser is at capacity; this call was rejected instead of queued.', {
+        hint: 'Retry shortly, or raise maxQueue in settings.',
+        details: { inFlight: this.inFlight, queued: this.queue.length },
+      });
+    }
+
+    this.counters.callsQueued += 1;
+    return new Promise<ResultMessage>((resolve, reject) => {
+      this.queue.push({ message, resolve, reject, enqueuedAt: Date.now() });
+    });
+  }
+
+  private async send(message: ExecuteMessage): Promise<ResultMessage> {
+    this.inFlight += 1;
+    try {
+      return await this.sendNow(message);
+    } finally {
+      this.inFlight -= 1;
+      this.drain();
+    }
+  }
+
+  private drain(): void {
+    const maxInFlight = this.store.settings.maxInFlight;
+    while (this.inFlight < maxInFlight && this.queue.length > 0) {
+      const next = this.queue.shift()!;
+      this.queueWait.add(Date.now() - next.enqueuedAt);
+      void this.send(next.message).then(next.resolve, next.reject);
+    }
+  }
+
+  private async sendNow(message: ExecuteMessage): Promise<ResultMessage> {
+    const socket = this.socket;
+    if (!socket) {
+      throw new ToolError(ErrorCode.NO_BROWSER, 'No browser is connected to the runtime.');
     }
     const id = message.id;
     return new Promise<ResultMessage>((resolve, reject) => {
@@ -335,7 +510,7 @@ export class ExtensionHub extends EventEmitter {
 
       this.pending.set(id, { resolve, reject, timer, startedAt: Date.now() });
       try {
-        this.socket!.send(JSON.stringify({ ...message, id }));
+        socket.send(JSON.stringify({ ...message, id }));
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -348,32 +523,58 @@ export class ExtensionHub extends EventEmitter {
     });
   }
 
-  private syncFrame(): { type: 'sync'; enabledDomains: string[]; deepCapture: string[] } {
-    const domains = this.store.listDomains().filter((domain) => domain.enabled);
+  /**
+   * Cancel an in-flight call. The browser aborts the fetch; the caller gets an
+   * `aborted` error immediately and no result is awaited.
+   */
+  cancel(id: string, reason = 'client_cancelled'): boolean {
+    const pending = this.pending.get(id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      this.counters.cancellations += 1;
+      try {
+        this.socket?.send(JSON.stringify({ type: 'cancel', id, reason }));
+      } catch {
+        /* the socket is already gone */
+      }
+      pending.reject(new ToolError(ErrorCode.ABORTED, 'The call was cancelled before the website answered.'));
+      return true;
+    }
+    const index = this.queue.findIndex((queued) => queued.message.id === id);
+    if (index >= 0) {
+      const [queued] = this.queue.splice(index, 1);
+      this.counters.cancellations += 1;
+      queued.reject(new ToolError(ErrorCode.ABORTED, 'The call was cancelled while queued.'));
+      return true;
+    }
+    return false;
+  }
+
+  private syncFrame(): { type: 'sync'; enabledOrigins: string[]; deepCaptureOrigins: string[]; enumCaptureOrigins: string[] } {
     return {
       type: 'sync',
-      enabledDomains: domains.map((domain) => domain.domain),
-      deepCapture: domains.filter((domain) => domain.deepCapture).map((domain) => domain.domain),
+      enabledOrigins: this.store.enabledOrigins(),
+      deepCaptureOrigins: this.store.deepCaptureOrigins(),
+      enumCaptureOrigins: this.store.enumCaptureOrigins(),
     };
   }
 
-  /** Push the current domain allowlist to the extension. */
+  /** Push the current origin allowlist to the extension. */
   sync(): void {
     if (!this.socket || !this.connection) return;
     this.socket.send(JSON.stringify(this.syncFrame()));
   }
 
-  startDiscovery(domain: string, deepCapture: boolean): void {
-    if (!this.socket) throw new ToolError(ErrorCode.EXTENSION_DISCONNECTED, 'No browser is connected.');
-    this.connection?.capturing.add(domain);
-    this.socket.send(JSON.stringify({ type: 'discovery_start', domain, deepCapture }));
+  startDiscovery(origin: string, domain: string, deepCapture: boolean, captureEnums = false): void {
+    if (!this.socket) throw new ToolError(ErrorCode.NO_BROWSER, 'No browser is connected.');
+    this.connection?.capturing.add(origin);
+    this.socket.send(JSON.stringify({ type: 'discovery_start', origin, domain, deepCapture, captureEnums }));
   }
 
-  stopDiscovery(domain: string): void {
-    if (this.socket) {
-      this.socket.send(JSON.stringify({ type: 'discovery_stop', domain }));
-    }
-    this.connection?.capturing.delete(domain);
+  stopDiscovery(origin: string): void {
+    if (this.socket) this.socket.send(JSON.stringify({ type: 'discovery_stop', origin }));
+    this.connection?.capturing.delete(origin);
   }
 
   private tick(): void {
@@ -387,13 +588,18 @@ export class ExtensionHub extends EventEmitter {
     }
   }
 
-  status(): {
-    connected: boolean;
-    client: { clientId: string; label: string; connectedAt: string } | null;
-    capturing: string[];
-    counters: { discoveryFrames: number; observationsIngested: number; observationsDropped: number; resultsReceived: number };
-  } {
-    if (!this.connection) return { connected: false, client: null, capturing: [], counters: { ...this.counters } };
+  metrics() {
+    return {
+      browserLatencyMs: this.browserLatency.summary(),
+      queueWaitMs: this.queueWait.summary(),
+      inFlight: this.inFlight,
+      queued: this.queue.length,
+      counters: { ...this.counters },
+    };
+  }
+
+  status() {
+    if (!this.connection) return { connected: false, client: null, capturing: [] as string[], counters: { ...this.counters } };
     return {
       connected: true,
       client: {

@@ -23,7 +23,7 @@ describe('discovery', () => {
     extension = await FakeExtension.pair({ runtimeUrl: harness.runtime.url, token: harness.runtime.token });
     await extension.connect();
     await extension.waitForSync();
-    await harness.api(`/api/v1/domains/${encodeURIComponent('127.0.0.1')}/discovery`, { method: 'POST' });
+    await harness.api(`/api/v1/domains/${encodeURIComponent(harness.site.origin)}/discovery`, { method: 'POST' });
   });
 
   after(async () => {
@@ -34,7 +34,7 @@ describe('discovery', () => {
   it('records endpoints only while capture is active', async () => {
     extension.sendDiscovery([
       {
-        domain: '127.0.0.1',
+        origin: harness.site.origin,
         method: 'GET',
         path: '/api/tasks',
         queryKeys: ['status', 'limit'],
@@ -49,7 +49,7 @@ describe('discovery', () => {
       return result.body.endpoints.length > 0 ? result.body.endpoints : null;
     });
     const endpoint = endpoints[0];
-    assert.equal(endpoint.key, 'GET /api/tasks');
+    assert.equal(endpoint.key, `${harness.site.origin} GET /api/tasks`);
     assert.deepEqual(endpoint.queryKeys.sort(), ['limit', 'status']);
     assert.equal(endpoint.sources[0], 'webRequest');
   });
@@ -57,7 +57,7 @@ describe('discovery', () => {
   it('merges repeated observations and unions the inferred schema', async () => {
     extension.sendDiscovery([
       {
-        domain: '127.0.0.1',
+        origin: harness.site.origin,
         method: 'POST',
         path: '/api/tasks',
         queryKeys: [],
@@ -71,7 +71,7 @@ describe('discovery', () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     extension.sendDiscovery([
       {
-        domain: '127.0.0.1',
+        origin: harness.site.origin,
         method: 'POST',
         path: '/api/tasks',
         queryKeys: [],
@@ -84,8 +84,8 @@ describe('discovery', () => {
     ]);
 
     const endpoint = await waitFor(async () => {
-      const result = await harness.api('/api/v1/endpoints?domain=127.0.0.1');
-      const found = result.body.endpoints.find((candidate: { key: string }) => candidate.key === 'POST /api/tasks');
+      const result = await harness.api('/api/v1/endpoints');
+      const found = result.body.endpoints.find((candidate: { key: string }) => candidate.key.endsWith('POST /api/tasks'));
       return found && found.sampleCount >= 2 ? found : null;
     });
     assert.equal(endpoint.permission, 'WRITE');
@@ -95,18 +95,18 @@ describe('discovery', () => {
 
   it('ignores observations for domains that are not enabled', async () => {
     extension.sendDiscovery([
-      { domain: 'example.org', method: 'GET', path: '/api/secret', queryKeys: [], status: 200, source: 'webRequest' },
+      { origin: 'https://example.org', method: 'GET', path: '/api/secret', queryKeys: [], status: 200, source: 'webRequest' },
     ]);
     await new Promise((resolve) => setTimeout(resolve, 250));
     const result = await harness.api('/api/v1/endpoints');
-    assert.equal(result.body.endpoints.some((endpoint: { domain: string }) => endpoint.domain === 'example.org'), false);
+    assert.equal(result.body.endpoints.some((endpoint: { origin: string }) => endpoint.origin === 'https://example.org'), false);
     assert.ok(harness.runtime.hub.status().counters.observationsDropped >= 1);
   });
 
   it('creates draft tools that are not executable or listed in the manual', async () => {
     const generated = await harness.api('/api/v1/tools/generate', {
       method: 'POST',
-      body: JSON.stringify({ domain: '127.0.0.1' }),
+      body: JSON.stringify({ origin: harness.site.origin }),
     });
     assert.equal(generated.status, 201);
     const created = generated.body.created as Array<{ fqName: string; status: string }>;
@@ -122,10 +122,10 @@ describe('discovery', () => {
   });
 
   it('stops recording when discovery is stopped', async () => {
-    await harness.api(`/api/v1/domains/${encodeURIComponent('127.0.0.1')}/discovery`, { method: 'DELETE' });
+    await harness.api(`/api/v1/domains/${encodeURIComponent(harness.site.origin)}/discovery`, { method: 'DELETE' });
     const before = (await harness.api('/api/v1/endpoints')).body.endpoints.length;
     extension.sendDiscovery([
-      { domain: '127.0.0.1', method: 'GET', path: '/api/after-stop', queryKeys: [], status: 200, source: 'webRequest' },
+      { origin: harness.site.origin, method: 'GET', path: '/api/after-stop', queryKeys: [], status: 200, source: 'webRequest' },
     ]);
     await new Promise((resolve) => setTimeout(resolve, 250));
     const after = (await harness.api('/api/v1/endpoints')).body.endpoints.length;

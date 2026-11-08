@@ -16,7 +16,7 @@ function seedTool(harness: Harness, options: SeedOptions = {}): ToolRecord {
   const method = options.method ?? 'GET';
   const path = options.path ?? '/api/tasks';
   harness.runtime.store.recordObservation({
-    domain: DOMAIN,
+    origin: harness.site.origin,
     method,
     path,
     queryKeys: method === 'GET' ? ['status'] : [],
@@ -25,7 +25,7 @@ function seedTool(harness: Harness, options: SeedOptions = {}): ToolRecord {
     source: 'webRequest',
     ...(options.bodyShape ? { requestShape: options.bodyShape as never } : {}),
   });
-  const { created } = harness.runtime.store.generateDrafts(DOMAIN);
+  const { created } = harness.runtime.store.generateDrafts(harness.site.origin);
   const tool = created.find((candidate) => candidate.method === method && candidate.pathTemplate === path) ?? created[0];
   harness.runtime.store.approveTool(tool.id, 'test');
   return tool;
@@ -103,14 +103,14 @@ describe('execution policy', () => {
 
   it('rejects a tool that is still a draft', async () => {
     harness.runtime.store.recordObservation({
-      domain: DOMAIN,
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/draft-only',
       queryKeys: [],
       status: 200,
       source: 'webRequest',
     });
-    const draft = harness.runtime.store.generateDrafts(DOMAIN).created.find((tool) => tool.pathTemplate === '/api/draft-only')!;
+    const draft = harness.runtime.store.generateDrafts(harness.site.origin).created.find((tool) => tool.pathTemplate === '/api/draft-only')!;
     const result = await execute(draft.fqName);
     assert.equal(result.body.error.code, 'approval_required');
     assert.equal(extension.received.length, 0, 'a draft must never reach the browser');
@@ -125,7 +125,7 @@ describe('execution policy', () => {
 
   it('refuses to run a tool after its domain is disabled (tools are revoked on disable)', async () => {
     const tool = seedTool(harness, { path: '/api/disabled-demo' });
-    harness.runtime.store.disableDomain(DOMAIN);
+    harness.runtime.store.disableDomain(harness.site.origin);
     try {
       const result = await execute(tool.fqName);
       assert.equal(result.body.ok, false);
@@ -135,7 +135,7 @@ describe('execution policy', () => {
       const audit = await harness.api('/api/v1/audit?kind=domain.disabled');
       assert.ok(audit.body.events.length >= 0);
     } finally {
-      harness.runtime.store.enableDomain(DOMAIN, { origin: harness.site.origin });
+      harness.runtime.store.enableDomain(harness.site.origin, DOMAIN);
       harness.runtime.store.approveTool(tool.id, 'test');
     }
   });
@@ -159,7 +159,7 @@ describe('execution policy', () => {
     assert.equal(extension.received.length, before + 1);
     const sent = extension.received.at(-1)!;
     assert.equal(sent.url, `${harness.site.origin}/api/tasks?status=open`);
-    assert.equal(sent.domain, DOMAIN);
+    assert.equal(sent.origin, harness.site.origin);
   });
 
   it('requires an explicit confirmation for destructive calls', async () => {
@@ -290,7 +290,7 @@ describe('execution policy', () => {
 
   it('records approvals made through the API as audit events', async () => {
     harness.runtime.store.recordObservation({
-      domain: DOMAIN,
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/audit-approval-demo',
       queryKeys: [],
@@ -298,7 +298,7 @@ describe('execution policy', () => {
       source: 'webRequest',
     });
     const draft = harness.runtime.store
-      .generateDrafts(DOMAIN)
+      .generateDrafts(harness.site.origin)
       .created.find((tool) => tool.pathTemplate === '/api/audit-approval-demo')!;
     const approved = await harness.api(`/api/v1/tools/${draft.id}/approve`, { method: 'POST' });
     assert.equal(approved.status, 200);

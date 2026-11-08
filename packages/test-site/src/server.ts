@@ -505,7 +505,11 @@ export function createTestSite(options: TestSiteOptions = {}): TestSite {
       origin = `http://127.0.0.1:${this.port}`;
     },
     async stop() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      // Browsers keep sockets alive; without this the close callback never fires.
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections?.();
+      });
     },
     reset() {
       tasks = cloneTasks();

@@ -68,6 +68,156 @@ export function shapeToJsonSchema(node: ShapeNode | undefined, depth = 0): JsonS
   }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-observation accumulation
+// ---------------------------------------------------------------------------
+
+/**
+ * A single observation is weak evidence: a field can be missing, null, or a
+ * different type in the next response. Merging finished schemas loses that
+ * information, so observations are folded into an accumulator that keeps a
+ * presence count per node and the JSON Schema is derived from it.
+ *
+ * A field only becomes `required` when it appeared in *every* observation and
+ * there were at least two observations. With one sample nothing is required, so
+ * a generated tool never rejects a valid call on weak evidence.
+ */
+export interface SchemaAccum {
+  /** Observations that contained this node. */
+  n: number;
+  types: string[];
+  props?: Record<string, SchemaAccum>;
+  items?: SchemaAccum;
+  /** Small closed value set, only for enum-sampled scalar fields. */
+  enums?: Array<string | number>;
+}
+
+export function newAccum(): SchemaAccum {
+  return { n: 0, types: [] };
+}
+
+export function accumShape(
+  prev: SchemaAccum | null | undefined,
+  node: ShapeNode | undefined,
+  /** Sampled value sets, keyed by field name (only at the top level). */
+  enums?: Record<string, string[]>,
+  depth = 0,
+): SchemaAccum {
+  const accum: SchemaAccum = prev
+    ? {
+        n: prev.n,
+        types: [...prev.types],
+        props: prev.props ? { ...prev.props } : undefined,
+        items: prev.items,
+        enums: prev.enums ? [...prev.enums] : undefined,
+      }
+    : newAccum();
+
+  if (depth > LIMITS.maxSchemaDepth) return accum;
+
+  if (!node) {
+    accum.n += 1;
+    if (!accum.types.includes('null')) accum.types.push('null');
+    return accum;
+  }
+
+  accum.n += 1;
+  const type = node.type === 'null' ? 'null' : node.type;
+  if (!accum.types.includes(type)) accum.types.push(type);
+
+  if (node.properties) {
+    const props: Record<string, SchemaAccum> = accum.props ? { ...accum.props } : {};
+    for (const [key, child] of Object.entries(node.properties).slice(0, LIMITS.maxSchemaProperties)) {
+      const sampled = depth === 0 ? enums?.[key] : undefined;
+      props[key] = accumShape(props[key], child, undefined, depth + 1);
+      if (sampled && sampled.length > 0) {
+        const merged = new Set<string | number>(props[key].enums ?? []);
+        for (const value of sampled.slice(0, 8)) merged.add(value);
+        props[key].enums = merged.size <= 8 ? [...merged] : undefined;
+      }
+    }
+    accum.props = props;
+  }
+
+  if (node.items) accum.items = accumShape(accum.items, node.items, undefined, depth + 1);
+
+  return accum;
+}
+
+/** Merge two accumulators (state restore, or combining two collection sources). */
+export function mergeAccum(a: SchemaAccum | null | undefined, b: SchemaAccum | null | undefined): SchemaAccum | null {
+  if (!a) return b ? { ...b } : null;
+  if (!b) return { ...a };
+  const out: SchemaAccum = { n: a.n + b.n, types: [...a.types] };
+  for (const type of b.types) if (!out.types.includes(type)) out.types.push(type);
+  if (a.props || b.props) {
+    const props: Record<string, SchemaAccum> = { ...(a.props ?? {}) };
+    for (const [key, child] of Object.entries(b.props ?? {})) {
+      const merged = mergeAccum(props[key], child);
+      if (merged) props[key] = merged;
+    }
+    out.props = props;
+  }
+  if (a.items || b.items) {
+    const merged = mergeAccum(a.items, b.items);
+    if (merged) out.items = merged;
+  }
+  if (a.enums || b.enums) {
+    const merged = new Set<string | number>([...(a.enums ?? []), ...(b.enums ?? [])]);
+    if (merged.size <= 8) out.enums = [...merged];
+  }
+  return out;
+}
+
+/** Derive a JSON Schema from an accumulator. */
+export function accumToSchema(accum: SchemaAccum, depth = 0): JsonSchema {
+  if (depth > LIMITS.maxSchemaDepth) return {};
+  const nonNull = accum.types.filter((type) => type !== 'null');
+  const isNullable = accum.types.includes('null');
+
+  if (nonNull.length === 0) return isNullable ? { type: 'null', nullable: true } : {};
+
+  // `type` stays a standard JSON Schema union so clients that ignore the
+  // OpenAPI-style `nullable` flag still see null as a possibility.
+  const types = isNullable ? [...nonNull, 'null'] : nonNull;
+  const schema: JsonSchema = { type: types.length === 1 ? types[0] : types };
+
+  if (accum.props && nonNull.includes('object')) {
+    const properties: Record<string, JsonSchema> = {};
+    const required: string[] = [];
+    for (const [key, child] of Object.entries(accum.props)) {
+      properties[key] = accumToSchema(child, depth + 1);
+      if (accum.n >= 2 && child.n === accum.n) required.push(key);
+    }
+    schema.properties = properties;
+    schema.additionalProperties = false;
+    if (required.length > 0) schema.required = required.sort();
+  }
+
+  if (accum.items && nonNull.includes('array')) schema.items = accumToSchema(accum.items, depth + 1);
+
+  if (accum.enums && accum.enums.length > 0) {
+    const allStrings = accum.enums.every((value) => typeof value === 'string');
+    const allNumbers = accum.enums.every((value) => typeof value === 'number');
+    if (allStrings || allNumbers) {
+      schema.enum = [...accum.enums].sort() as unknown[];
+      schema.type = allStrings ? 'string' : 'number';
+    }
+  }
+
+  if (isNullable) schema.nullable = true;
+  return schema;
+}
+
+/** How much evidence supports an accumulator, 0..1. */
+export function accumConfidence(accum: SchemaAccum | null | undefined): number {
+  if (!accum || accum.n === 0) return 0;
+  const sampleScore = Math.min(accum.n, 3) / 3;
+  const shapeScore = accum.props && Object.keys(accum.props).length > 0 ? 1 : accum.items ? 0.8 : 0.6;
+  const stableTypes = accum.types.length === 1 || (accum.types.length === 2 && accum.types.includes('null'));
+  return Math.round((0.5 * sampleScore + 0.3 * shapeScore + 0.2 * (stableTypes ? 1 : 0.6)) * 100) / 100;
+}
+
 function typeSet(schema: JsonSchema): string[] {
   if (!schema.type) return [];
   return Array.isArray(schema.type) ? schema.type : [schema.type];
@@ -264,6 +414,10 @@ export interface InputBuildInput {
   queryKeys: string[];
   bodySchema?: JsonSchema;
   querySchema?: JsonSchema;
+  /** Pagination the page used, so the tool exposes the right paging params. */
+  pagination?: { style: 'page' | 'offset' | 'cursor'; param: string; hasTotal: boolean; nextField: string | null } | null;
+  /** GraphQL operation name, when the endpoint is a GraphQL operation. */
+  graphqlOperation?: string | null;
 }
 
 export interface BuiltInputs {
@@ -291,6 +445,21 @@ export function buildInputSchema(input: InputBuildInput): BuiltInputs {
     const typed = querySchema?.properties?.[key];
     properties[key] = typed ? { ...typed, description: `Query parameter "${key}".` } : { type: 'string', description: `Query parameter "${key}".` };
     paramLocations[key] = 'query';
+  }
+
+  // Pagination: expose the paging controls the page actually used, so an agent
+  // can walk results instead of guessing parameter names.
+  if (input.pagination) {
+    const { style, param } = input.pagination;
+    const pagingParams: Array<[string, JsonSchema]> = [
+      [param, style === 'cursor' ? { type: 'string', description: `Pagination cursor (${style}).` } : { type: 'integer', minimum: 1, description: `Page selector (${style}).` }],
+    ];
+    if (style !== 'cursor') pagingParams.push(['limit', { type: 'integer', minimum: 1, description: 'Maximum items to return.' }]);
+    for (const [name, schema] of pagingParams) {
+      if (properties[name] || paramLocations[name]) continue;
+      properties[name] = schema;
+      paramLocations[name] = 'query';
+    }
   }
 
   let requiredBody = false;

@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6.svg)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/chrome-MV3-8b5cf6.svg)](#compatibility)
 [![UTCP 1.2.0](https://img.shields.io/badge/utcp-1.2.0-22c55e.svg)](https://github.com/universal-tool-calling-protocol/typescript-utcp)
-[![Tests](https://img.shields.io/badge/tests-123%20passing-22c55e.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-165%20passing-22c55e.svg)](#development)
 [![Node 24](https://img.shields.io/badge/node-%E2%89%A522.18-339933.svg)](#quick-start)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Security](#security) · [Compatibility](#compatibility) · [Docs](#documentation) · [Roadmap](#roadmap)
@@ -96,15 +96,19 @@ Everything below is implemented and covered by a test.
 | --- | --- |
 | **Native UTCP transport** | `BrowserSessionCommunicationProtocol` extends the official `CommunicationProtocol`; a `CallTemplateSerializer` is registered for the `utcp_browser_session` type. Manifests validate with `UtcpManualSchema`. |
 | **Session reuse without extraction** | Requests run in the extension service worker with `credentials: 'include'`. Chrome attaches HttpOnly cookies at the network layer; extension JavaScript never reads them. |
-| **Domain allowlist** | Exact hostname, pinned `scheme://host:port`, re-validated on every call, on both sides of the websocket. |
-| **API discovery** | `webRequest` inventory plus opt-in structural schema capture. Start/stop per domain, from the dashboard or the popup. |
+| **Per-origin isolation** | The origin is the unit of everything: two apps on one host never share a record, a policy, a session state or a cookie. Re-validated on both sides of the websocket. |
+| **Domain policy** | Per-domain ceiling (`READ` / `WRITE` / `DESTRUCTIVE`), optional confirm-on-write, blocked path prefixes. Enforced at execution time, never by relabelling a tool. |
+| **API discovery** | `webRequest` inventory plus opt-in structural schema capture. Classifies REST / GraphQL / upload / download / stream, detects pagination, records CSRF hints, and scores confidence 0–1. Start/stop per origin, from the dashboard or the popup. |
 | **Human-reviewed tool generation** | Draft tools with input schema, parameter locations, permission level and discovery provenance. Approve, rename, revoke, delete. |
-| **Permission levels** | `READ` / `WRITE` / `DESTRUCTIVE`, derived from method and path, with unknown operations flagged for review. Destructive calls need `__confirm`. |
+| **Permission levels** | `READ` / `WRITE` / `DESTRUCTIVE` from evidence, not the verb alone: path semantics, GraphQL operation name, body shape; unknown operations stay `review required`. Destructive calls need `__confirm`. |
 | **Argument validation** | JSON Schema validation before anything leaves the runtime; unknown parameters are rejected, not ignored. |
 | **CSRF bootstrap** | Optional, explicitly configured: the extension fetches a token from a documented JSON endpoint with the session cookie and attaches it to writes. |
 | **Structured errors** | A stable code catalogue (`website_auth_expired`, `redirect_blocked`, `confirmation_required`, …) with an actionable hint and no secrets. |
-| **Audit trail** | Approvals, executions, rejections, blocked redirects, pairing attempts, handshake failures — all redacted. |
-| **Dashboard** | Websites, tool explorer with test calls, execution inspector, security centre, limits. |
+| **Audit trail** | Approvals, executions, rejections, redirects, pairing attempts, handshake failures — redacted and hash-chained, with `GET /api/v1/audit/verify` to detect tampering. |
+| **Bounded execution** | `maxInFlight` concurrent browser calls, a bounded queue, `busy` beyond it, cancellation when the caller disconnects, and per-call `queuedMs` in the metrics. |
+| **Observability** | Correlation ids across client → runtime → extension → audit, latency/queue percentiles at `GET /api/v1/metrics`, error categories on every execution. |
+| **Workflow proposals** | Optional: repeated tool sequences in the execution history become reviewable proposals with inferred parameter bindings. Never auto-executed. |
+| **Dashboard** | Websites, tool explorer with test calls, workflow proposals, execution inspector, security centre with audit-chain verification, limits. |
 | **Fixture site** | A deterministic local website with login, CSRF, destructive endpoints, expiry, slow/large/invalid responses and a request log. |
 
 ## Quick start
@@ -264,6 +268,7 @@ is compromised.
 | --- | --- |
 | Browser | Chrome / Chromium ≥ 116 (MV3). Not Firefox, not mobile. |
 | Works when | same-origin JSON API, cookie auth (HttpOnly is fine), CSRF token fetchable with the session cookie, no same-origin `Origin` requirement |
+| Discovered but not executable | GraphQL operations (the query document is never recorded), multipart uploads, streaming responses, binary downloads — they appear in the inventory with the reason, and never become tools |
 | Does not work | cross-origin API hosts, `localStorage` bearer tokens, sites that reject `chrome-extension://` origins, strict CSP that blocks the tap (degrades to method/path only), GraphQL-only APIs, streaming, WebSockets |
 | Never | cookie export, `Origin` spoofing, CAPTCHA/bot-detection bypass, acting as a proxy |
 
@@ -279,7 +284,8 @@ Details and the full table: [`docs/limitations.md`](docs/limitations.md).
 | [`docs/performance.md`](docs/performance.md) | Benchmark method and measured overhead |
 | [`docs/limitations.md`](docs/limitations.md) | Every known constraint, including unsupported sites |
 | [`docs/competitive-analysis.md`](docs/competitive-analysis.md) | Honest comparison with browser-session MCP, Web-API_Extension, Playwright MCP |
-| [`docs/acceptance-report.md`](docs/acceptance-report.md) | AC-01…AC-11 with commands, expected/actual results and evidence |
+| [`docs/audit-report.md`](docs/audit-report.md) | Architecture and security audit: findings by severity, root cause, fix, evidence |
+| [`docs/acceptance-report.md`](docs/acceptance-report.md) | AC-01…AC-19 with commands, expected/actual results and evidence |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setup, conventions, how to add a capability |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability |
 
@@ -320,14 +326,20 @@ direct browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
 - UTCP manual generation validated by the official SDK
 - Execution with argument validation, permissions, confirmation, rate limits,
   timeouts, truncation, redirect blocking
-- Dashboard: overview, websites, tools, executions, security, settings
-- Fixture site, 4 test suites, benchmark, CI
+- Dashboard: overview, websites, tools, workflows, executions, security, settings
+- Fixture site, unit + integration + security + E2E suites, benchmark, CI
+- Per-origin isolation, domain policy ceilings, bounded concurrency, cancellation
+- Multi-observation schema inference (required / optional / nullable / enums),
+  pagination and operation-kind classification, confidence scoring
+- Correlation ids, metrics endpoint, hash-chained audit log
+- Workflow proposals from execution history (review only)
 
 **In progress**
 
-- Multi-domain session isolation (one runtime per browser profile is currently a
-  hard limit)
-- Better schema inference for GraphQL (named operations instead of one endpoint)
+- Richer GraphQL support: the operation *name* is classified today, but the
+  query document is deliberately not recorded, so those tools stay non-executable
+  until the user supplies a query template in the dashboard
+- A second browser profile per runtime (today: one extension connection)
 
 **Planned**
 
@@ -335,7 +347,7 @@ direct browser `fetch` (see [`docs/performance.md`](docs/performance.md)).
 - Optional `chrome.debugger` mode for response bodies on sites where the page tap
   is blocked by CSP — behind an explicit, documented permission prompt
 - Import/export of approved tool sets between machines
-- Per-domain concurrency limits and a queue for long-running batches
+- Per-origin rate limits (today the limit is per tool, plus a global in-flight cap)
 
 Nothing in *Planned* exists in the code today. If you need one of these, open an
 issue rather than assuming it works.

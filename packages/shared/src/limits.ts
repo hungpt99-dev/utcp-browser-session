@@ -21,6 +21,12 @@ export const LIMITS = {
   maxSchemaProperties: 64,
   /** Max JSON nesting the schema inferrer will walk. */
   maxSchemaDepth: 6,
+  /** Browser calls allowed in flight at once; the rest queue. */
+  maxInFlight: 8,
+  /** Queued calls tolerated before the runtime answers `busy`. */
+  maxQueue: 32,
+  /** Discovery observations buffered per flush. */
+  discoveryBatch: 200,
 } as const;
 
 export const CONTENT_TYPE_JSON = 'application/json';

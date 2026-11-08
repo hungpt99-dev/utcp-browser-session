@@ -7,7 +7,9 @@
  *   - the UTCP provider / CLI (bearer token).
  *
  * The extension's websocket is the only channel that can execute a request
- * against a website; no HTTP route proxies arbitrary URLs.
+ * against a website; no HTTP route proxies arbitrary URLs. Websites are
+ * addressed by their origin, never by hostname, so two applications on the same
+ * host stay isolated.
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -18,9 +20,11 @@ import {
   ErrorCode,
   ExecuteRequestSchema,
   PairClaimSchema,
+  ToolPatchSchema,
   normalizeDomain,
   parseDomainInput,
   toErrorShape,
+  type DomainRecord,
   type ExecutionEnvelope,
 } from '@utcp-browser-session/shared';
 import type { RuntimeConfig } from './config.ts';
@@ -28,6 +32,7 @@ import type { Store } from './store.ts';
 import type { ExtensionHub } from './connections.ts';
 import type { Executor } from './executor.ts';
 import type { Logger } from './logger.ts';
+import { discoverWorkflows } from './workflows.ts';
 import { buildManual, validateManualDocument, TOKEN_VARIABLE } from './manual.ts';
 import { safeEqual } from './token.ts';
 
@@ -144,6 +149,18 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
     return safeEqual(match[1].trim(), token);
   }
 
+  /** Accept either a full origin (preferred) or a bare hostname. */
+  function resolveDomain(value: string): DomainRecord | undefined {
+    let decoded = value;
+    try {
+      decoded = decodeURIComponent(value);
+    } catch {
+      /* keep the raw value */
+    }
+    if (decoded.startsWith('http://') || decoded.startsWith('https://')) return store.getDomain(decoded);
+    return store.getDomainByHostname(normalizeDomain(decoded));
+  }
+
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', config.publicUrl);
     const pathname = url.pathname;
@@ -151,7 +168,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
 
     // --- unauthenticated, side-effect free ---------------------------------
     if (pathname === '/health') {
-      json(res, 200, { ok: true, service: 'utcp-browser-session', version: '0.1.0' });
+      json(res, 200, { ok: true, service: 'utcp-browser-session', version: '0.2.0' });
       return;
     }
 
@@ -177,8 +194,6 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
           kind: 'pair.claim_rejected',
           severity: 'warn',
           actor: 'extension',
-          domain: null,
-          toolName: null,
           message: 'Pairing claim rejected: request did not come from a Chrome extension.',
         });
         throw new HttpError(403, ErrorCode.ORIGIN_NOT_ALLOWED, 'Pairing claims must come from a Chrome extension origin.');
@@ -195,8 +210,6 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
           kind: 'pair.claim_rejected',
           severity: 'warn',
           actor: 'extension',
-          domain: null,
-          toolName: null,
           message: `Pairing claim rejected: ${verdict.reason}`,
         });
         throw new HttpError(400, ErrorCode.PAIRING_INVALID, verdict.reason ?? 'Invalid pairing code.');
@@ -210,8 +223,6 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
         kind: 'pair.claimed',
         severity: 'info',
         actor: 'extension',
-        domain: null,
-        toolName: null,
         message: `Extension paired as "${client.label}" (${client.clientId}).`,
       });
       json(res, 201, { clientId: client.clientId, runtimeId: store.runtimeId }, corsHeaders);
@@ -228,11 +239,21 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       json(res, 200, {
         ok: true,
         runtimeId: store.runtimeId,
-        version: '0.1.0',
+        version: '0.2.0',
         connection: hub.status(),
         stats: store.stats(),
         settings: store.settings,
         tokenVariable: TOKEN_VARIABLE,
+      });
+      return;
+    }
+
+    if (pathname === '/api/v1/metrics' && method === 'GET') {
+      json(res, 200, {
+        ...hub.metrics(),
+        store: store.stats(),
+        memory: process.memoryUsage().rss,
+        uptimeSeconds: Math.round(process.uptime()),
       });
       return;
     }
@@ -244,6 +265,8 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
           defaultTimeoutMs: z.number().int().min(1000).max(120_000).optional(),
           maxResponseBytes: z.number().int().min(1024).max(8 * 1024 * 1024).optional(),
           rateLimitPerMinute: z.number().int().min(1).max(600).optional(),
+          maxInFlight: z.number().int().min(1).max(32).optional(),
+          maxQueue: z.number().int().min(0).max(200).optional(),
         })
         .safeParse(await readJson(req));
       if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid settings payload.');
@@ -258,8 +281,6 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
         kind: 'pair.code_created',
         severity: 'info',
         actor: 'dashboard',
-        domain: null,
-        toolName: null,
         message: 'A pairing code was created.',
       });
       json(res, 201, { code: pairing.code, expiresAt: pairing.expiresAt });
@@ -271,8 +292,8 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       json(res, 200, {
         domains: store.listDomains().map((domain) => ({
           ...domain,
-          endpoints: store.listEndpoints(domain.domain).length,
-          approvedTools: store.listTools({ domain: domain.domain, status: 'approved' }).length,
+          endpoints: store.listEndpoints(domain.origin).length,
+          approvedTools: store.listTools({ origin: domain.origin, status: 'approved' }).length,
         })),
       });
       return;
@@ -283,72 +304,104 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid domain payload.');
       const target = parseDomainInput(parsed.data.domain);
       if (!target) throw new HttpError(400, ErrorCode.DOMAIN_NOT_ALLOWED, 'Enter a valid hostname or site URL.');
-      const domain = target.domain;
-      const record = store.enableDomain(domain, {
-        origin: target.origin,
+      const record = store.enableDomain(target.origin, target.domain, {
         deepCapture: parsed.data.deepCapture,
+        captureEnums: parsed.data.captureEnums,
         csrf: parsed.data.csrf,
+        policy: parsed.data.policy,
       });
       store.audit({
         kind: 'domain.enabled',
         severity: 'info',
         actor: 'dashboard',
-        domain,
-        toolName: null,
-        message: `Domain ${domain} enabled${record.deepCapture ? ' with schema capture' : ''}.`,
+        origin: target.origin,
+        message: `Enabled ${target.origin}${record.deepCapture ? ' with schema capture' : ''}.`,
       });
       hub.sync();
       json(res, 201, { domain: record });
       return;
     }
 
-    const domainMatch = /^\/api\/v1\/domains\/([^/]+)(\/discovery)?$/.exec(pathname);
+    const domainMatch = /^\/api\/v1\/domains\/([^/]+?)(\/discovery)?$/.exec(pathname);
     if (domainMatch) {
-      const domain = normalizeDomain(decodeURIComponent(domainMatch[1]));
+      const record = resolveDomain(domainMatch[1]);
+      if (!record) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Domain is not enabled.');
+      const origin = record.origin;
       const isDiscovery = !!domainMatch[2];
+
+      if (method === 'PATCH' && !isDiscovery) {
+        const parsed = z
+          .object({
+            policy: z
+              .object({
+                maxPermission: z.enum(['READ', 'WRITE', 'DESTRUCTIVE']).optional(),
+                confirmWrites: z.boolean().optional(),
+                blockedPathPrefixes: z.array(z.string().max(200)).max(20).optional(),
+              })
+              .optional(),
+            deepCapture: z.boolean().optional(),
+            captureEnums: z.boolean().optional(),
+          })
+          .safeParse(await readJson(req));
+        if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid domain patch.');
+        if (parsed.data.policy) store.updatePolicy(origin, parsed.data.policy);
+        if (parsed.data.deepCapture !== undefined || parsed.data.captureEnums !== undefined) {
+          store.enableDomain(origin, record.domain, {
+            deepCapture: parsed.data.deepCapture ?? record.deepCapture,
+            captureEnums: parsed.data.captureEnums ?? record.captureEnums,
+          });
+        }
+        store.audit({
+          kind: 'domain.policy_updated',
+          severity: 'warn',
+          actor: 'dashboard',
+          origin,
+          message: `Policy updated for ${origin}.`,
+          detail: { policy: parsed.data.policy, deepCapture: parsed.data.deepCapture, captureEnums: parsed.data.captureEnums },
+        });
+        hub.sync();
+        json(res, 200, { domain: store.getDomain(origin) });
+        return;
+      }
+
       if (method === 'DELETE' && !isDiscovery) {
-        const removed = store.disableDomain(domain);
-        if (!removed) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Domain is not enabled.');
+        if (!store.disableDomain(origin)) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Domain is not enabled.');
         store.audit({
           kind: 'domain.disabled',
           severity: 'warn',
           actor: 'dashboard',
-          domain,
-          toolName: null,
-          message: `Domain ${domain} disabled and its tools revoked.`,
+          origin,
+          message: `Disabled ${origin} and revoked its tools.`,
         });
         hub.sync();
         json(res, 200, { ok: true });
         return;
       }
       if (isDiscovery && method === 'POST') {
-        if (!store.isDomainEnabled(domain)) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Enable the domain first.');
-        const record = store.getDomain(domain);
+        if (!record.enabled) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Enable the domain first.');
         try {
-          hub.startDiscovery(domain, record?.deepCapture ?? false);
+          hub.startDiscovery(origin, record.domain, record.deepCapture, record.captureEnums);
         } catch (error) {
-          throw new HttpError(409, ErrorCode.EXTENSION_DISCONNECTED, (error as Error).message);
+          throw new HttpError(409, ErrorCode.NO_BROWSER, (error as Error).message);
         }
         store.audit({
           kind: 'discovery.started',
           severity: 'info',
           actor: 'dashboard',
-          domain,
-          toolName: null,
-          message: `Discovery started for ${domain}.`,
+          origin,
+          message: `Discovery started for ${origin}.`,
         });
-        json(res, 200, { ok: true, domain, deepCapture: record?.deepCapture ?? false });
+        json(res, 200, { ok: true, origin, deepCapture: record.deepCapture, captureEnums: record.captureEnums });
         return;
       }
       if (isDiscovery && method === 'DELETE') {
-        hub.stopDiscovery(domain);
+        hub.stopDiscovery(origin);
         store.audit({
           kind: 'discovery.stopped',
           severity: 'info',
           actor: 'dashboard',
-          domain,
-          toolName: null,
-          message: `Discovery stopped for ${domain}.`,
+          origin,
+          message: `Discovery stopped for ${origin}.`,
         });
         json(res, 200, { ok: true });
         return;
@@ -357,18 +410,20 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
 
     // --- endpoints ---------------------------------------------------------
     if (pathname === '/api/v1/endpoints' && method === 'GET') {
-      const domain = url.searchParams.get('domain');
-      json(res, 200, { endpoints: store.listEndpoints(domain ? normalizeDomain(domain) : undefined) });
+      const raw = url.searchParams.get('origin') ?? url.searchParams.get('domain');
+      const record = raw ? resolveDomain(raw) : undefined;
+      json(res, 200, { endpoints: store.listEndpoints(record?.origin) });
       return;
     }
 
     // --- tools -------------------------------------------------------------
     if (pathname === '/api/v1/tools' && method === 'GET') {
       const status = url.searchParams.get('status');
-      const domain = url.searchParams.get('domain');
+      const raw = url.searchParams.get('origin') ?? url.searchParams.get('domain');
+      const record = raw ? resolveDomain(raw) : undefined;
       const tools = store.listTools({
         status: status === 'draft' || status === 'approved' || status === 'revoked' ? status : undefined,
-        domain: domain ? normalizeDomain(domain) : undefined,
+        origin: record?.origin,
       });
       json(res, 200, { tools });
       return;
@@ -376,19 +431,25 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
 
     if (pathname === '/api/v1/tools/generate' && method === 'POST') {
       const parsed = z
-        .object({ domain: z.string().min(1), endpointKeys: z.array(z.string()).max(200).optional() })
+        .object({
+          origin: z.string().min(1).optional(),
+          domain: z.string().min(1).optional(),
+          endpointKeys: z.array(z.string()).max(200).optional(),
+        })
         .safeParse(await readJson(req));
       if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid generate payload.');
-      const domain = normalizeDomain(parsed.data.domain);
-      if (!store.isDomainEnabled(domain)) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Domain is not enabled.');
-      const result = store.generateDrafts(domain, parsed.data.endpointKeys);
+      const raw = parsed.data.origin ?? parsed.data.domain;
+      if (!raw) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'origin is required.');
+      const record = resolveDomain(raw);
+      if (!record || !record.enabled) throw new HttpError(404, ErrorCode.DOMAIN_NOT_ALLOWED, 'Domain is not enabled.');
+      const result = store.generateDrafts(record.origin, parsed.data.endpointKeys);
       store.audit({
         kind: 'tools.generated',
         severity: 'info',
         actor: 'dashboard',
-        domain,
-        toolName: null,
-        message: `Generated ${result.created.length} draft tool(s) for ${domain}.`,
+        origin: record.origin,
+        message: `Generated ${result.created.length} draft tool(s) for ${record.origin}.`,
+        detail: { skipped: result.skipped.length },
       });
       json(res, 201, result);
       return;
@@ -402,12 +463,12 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
         const tool = store.getTool(id);
         if (!tool) throw new HttpError(404, ErrorCode.UNKNOWN_TOOL, 'Tool not found.');
         const approved = store.approveTool(id, 'dashboard');
-        if (!approved) throw new HttpError(409, ErrorCode.DOMAIN_NOT_ALLOWED, 'Enable the tool\'s domain before approving it.');
+        if (!approved) throw new HttpError(409, ErrorCode.DOMAIN_NOT_ALLOWED, "Enable the tool's domain before approving it.");
         store.audit({
           kind: 'tool.approved',
           severity: 'info',
           actor: 'dashboard',
-          domain: approved.domain,
+          origin: approved.origin,
           toolName: approved.fqName,
           message: `Approved "${approved.fqName}" (${approved.permission}).`,
         });
@@ -421,7 +482,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
           kind: 'tool.revoked',
           severity: 'warn',
           actor: 'dashboard',
-          domain: revoked.domain,
+          origin: revoked.origin,
           toolName: revoked.fqName,
           message: `Revoked "${revoked.fqName}".`,
         });
@@ -429,10 +490,19 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
         return;
       }
       if (method === 'PATCH' && !action) {
-        const parsed = z.object({ name: z.string().min(1).max(60).optional(), description: z.string().min(1).max(600).optional() }).safeParse(await readJson(req));
+        const parsed = ToolPatchSchema.safeParse(await readJson(req));
         if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid tool patch.');
         const updated = store.updateTool(id, parsed.data);
         if (!updated) throw new HttpError(409, ErrorCode.INVALID_REQUEST, 'Tool not found or the new name is taken.');
+        store.audit({
+          kind: 'tool.updated',
+          severity: 'info',
+          actor: 'dashboard',
+          origin: updated.origin,
+          toolName: updated.fqName,
+          message: `Updated "${updated.fqName}".`,
+          detail: { permission: updated.permission },
+        });
         json(res, 200, { tool: updated });
         return;
       }
@@ -447,8 +517,24 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
     if (pathname === '/api/v1/execute' && method === 'POST') {
       const parsed = ExecuteRequestSchema.safeParse(await readJson(req));
       if (!parsed.success) throw new HttpError(400, ErrorCode.INVALID_REQUEST, 'Invalid execute payload.');
-      const envelope: ExecutionEnvelope = await executor.execute(parsed.data);
-      json(res, 200, envelope);
+      const correlationId =
+        parsed.data.correlationId ?? (req.headers['x-correlation-id'] as string | undefined) ?? undefined;
+
+      // If the caller hangs up, stop the browser request instead of letting it
+      // finish into a response nobody will read.
+      let dispatchId: string | null = null;
+      const onClose = (): void => {
+        if (!res.writableEnded && dispatchId) hub.cancel(dispatchId, 'client_cancelled');
+      };
+      // `res` closes when the caller aborts; `req` may already be complete.
+      res.on('close', onClose);
+
+      const envelope: ExecutionEnvelope = await executor.execute(
+        { ...parsed.data, correlationId },
+        { onDispatched: (id) => { dispatchId = id; } },
+      );
+      res.off('close', onClose);
+      json(res, 200, envelope, { 'x-correlation-id': envelope.correlationId });
       return;
     }
 
@@ -463,6 +549,53 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 100) || 100, 500);
       const kind = url.searchParams.get('kind') ?? undefined;
       json(res, 200, { events: store.listAudit(limit, kind) });
+      return;
+    }
+
+    if (pathname === '/api/v1/audit/verify' && method === 'GET') {
+      json(res, 200, store.verifyAudit());
+      return;
+    }
+
+    // --- workflows ---------------------------------------------------------
+    if (pathname === '/api/v1/workflows' && method === 'GET') {
+      const status = url.searchParams.get('status');
+      json(res, 200, {
+        workflows: store.listWorkflows(
+          status === 'draft' || status === 'approved' || status === 'rejected' ? status : undefined,
+        ),
+      });
+      return;
+    }
+
+    if (pathname === '/api/v1/workflows/discover' && method === 'POST') {
+      const proposals = discoverWorkflows(store);
+      store.saveWorkflows(proposals);
+      store.audit({
+        kind: 'workflows.discovered',
+        severity: 'info',
+        actor: 'dashboard',
+        message: `Workflow discovery produced ${proposals.length} proposal(s); nothing was published.`,
+      });
+      json(res, 200, { proposals, total: store.listWorkflows().length });
+      return;
+    }
+
+    const workflowMatch = /^\/api\/v1\/workflows\/([^/]+)\/(approve|reject)$/.exec(pathname);
+    if (workflowMatch && method === 'POST') {
+      const updated = store.setWorkflowStatus(
+        decodeURIComponent(workflowMatch[1]),
+        workflowMatch[2] === 'approve' ? 'approved' : 'rejected',
+      );
+      if (!updated) throw new HttpError(404, ErrorCode.INVALID_REQUEST, 'Workflow not found.');
+      store.audit({
+        kind: workflowMatch[2] === 'approve' ? 'workflow.approved' : 'workflow.rejected',
+        severity: 'info',
+        actor: 'dashboard',
+        origin: updated.origin,
+        message: `Workflow "${updated.name}" ${workflowMatch[2] === 'approve' ? 'approved' : 'rejected'}.`,
+      });
+      json(res, 200, { workflow: updated });
       return;
     }
 
@@ -500,6 +633,12 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
     if (clientMatch && method === 'DELETE') {
       const revoked = store.revokeClient(decodeURIComponent(clientMatch[1]));
       if (!revoked) throw new HttpError(404, ErrorCode.PAIRING_INVALID, 'Unknown client.');
+      store.audit({
+        kind: 'extension.revoked',
+        severity: 'warn',
+        actor: 'dashboard',
+        message: 'A paired browser was revoked.',
+      });
       json(res, 200, { ok: true });
       return;
     }

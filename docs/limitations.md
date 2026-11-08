@@ -102,6 +102,25 @@ Known unsupported cases:
 - **The runtime must be running** for the provider to register a manual; the
   provider does not cache.
 
+## Known gaps in this revision
+
+- **GraphQL is classified but not executable.** The tap records the operation
+  name and the envelope shape, never the query document, so a generated tool
+  could not replay the call. Those endpoints appear in the inventory with
+  `kind: graphql` and are skipped by draft generation with the reason shown.
+- **Uploads and streams are not executable.** Multipart bodies and `text/event-stream`
+  bodies cannot be replayed faithfully through this transport; they are
+  discovered, classified and skipped.
+- **Cookies are host-scoped, not origin-scoped.** Two applications on the same
+  host share a cookie jar when they use the same cookie name and path; the
+  browser will overwrite one with the other. The runtime keeps the two *origins*
+  isolated, but the website's own cookie rules still apply. Different hostnames
+  (including `localhost` vs `127.0.0.1`) have separate jars.
+- **One browser profile per runtime.** A second Chrome profile needs a second
+  runtime (different `UBS_DATA_DIR` and port).
+- **Per-tool rate limits only.** There is no per-origin quota; the global
+  in-flight cap is the coarse protection.
+
 ## Things this project will not do
 
 - Export cookies or session tokens, to any client, in any format.

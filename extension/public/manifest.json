@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "UTCP Browser Session",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Turns your existing signed-in browser sessions into approved, auditable UTCP tools.",
   "minimum_chrome_version": "116",
   "background": {

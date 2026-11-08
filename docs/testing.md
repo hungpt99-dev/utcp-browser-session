@@ -18,6 +18,17 @@ xvfb-run -a npm run test:e2e # same, on a headless Linux box
 npm run bench                # performance comparison, writes docs/performance.json
 ```
 
+## Counts (this revision)
+
+| Suite | Files | Tests | What it proves |
+| --- | --- | --- | --- |
+| `tests/unit` | 8 | 84 | schema accumulation, classification, URL/domain policy, redaction, manual integrity, audit chain, workflow inference |
+| `tests/integration` | 7 | 53 | discovery ingest, execution policy, isolation between origins, policy ceilings, concurrency/queue/cancel, popup intents, pairing |
+| `tests/security` | 2 | 14 | SSRF, credential leakage |
+| `tests/e2e` | 2 | 14 | the real browser: install, pair, discover, approve, execute, isolate, expire, disconnect |
+
+`npm test` runs the first three (151 tests). `npm run test:e2e` runs Playwright.
+
 ## Suites
 
 | Suite | Location | What it proves |
@@ -102,6 +113,21 @@ extension and a real runtime, in order:
 | AC-09 leakage | execution history, audit log and `state.json` contain no cookie, no `authorization`, no session secret, no runtime token, and the extension cannot read cookies |
 | AC-10 timeout | a 5 s endpoint with a 1 s timeout returns a structured timeout and the runtime stays connected |
 | AC-10 disconnect | unpairing drops the socket, calls fail with a browser error, the runtime survives, re-pairing restores execution |
+
+## Isolation, concurrency and intents
+
+Three suites exist specifically because the audit found real defects:
+
+- `tests/integration/isolation.test.ts` — two origins on `127.0.0.1` with
+  different ports: separate records, separate tools, correct dispatch target,
+  independent revocation, independent session state, policy ceiling, blocked
+  paths. Before the fix, the second `enable` overwrote the first origin.
+- `tests/integration/concurrency.test.ts` — 5 calls with `maxInFlight: 2` and
+  `maxQueue: 2` → 2 run, 2 queue, 1 `busy`, peak concurrency 2; a client
+  disconnect cancels the browser call and leaves the hub usable.
+- `tests/integration/intents.test.ts` — popup actions (`enable_origin`,
+  `discovery_start/stop`) actually reach the runtime, are audited, and are
+  refused for unenabled or non-http origins.
 
 ## Benchmark
 

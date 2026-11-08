@@ -86,7 +86,14 @@ export const test = base.extend<{}, { world: World }>({
         },
         async pair(existing) {
           const page = existing ?? (await world.popup());
-          await page.waitForSelector('input[placeholder="ABCD-2345"]', { timeout: 15_000 });
+          // The world is worker-scoped, so a later spec may find the browser
+          // already paired; in that case only the socket needs repairing.
+          if ((await page.locator('input[placeholder="ABCD-2345"]').count()) === 0) {
+            await page.getByRole('button', { name: 'Reconnect' }).click({ timeout: 5_000 }).catch(() => undefined);
+            await page.getByText('Connected', { exact: true }).waitFor({ timeout: 20_000 });
+            return page;
+          }
+          await page.waitForSelector('input[placeholder="ABCD-2345"]', { timeout: 20_000 });
           const { code } = (await api<{ code: string }>('/api/v1/pair/start', { method: 'POST' })).body;
           await page.getByLabel('Runtime address').fill(runtime.url);
           await page.getByLabel('Pairing code').fill(code);
@@ -116,22 +123,22 @@ export const test = base.extend<{}, { world: World }>({
           });
         },
         async startDiscovery() {
-          const result = await api('/api/v1/domains/127.0.0.1/discovery', { method: 'POST' });
+          const result = await api(`/api/v1/domains/${encodeURIComponent(site.origin)}/discovery`, { method: 'POST' });
           if (result.status !== 200) throw new Error(`discovery start failed: ${JSON.stringify(result.body)}`);
           // Wait until the extension has acknowledged capture, the same state the
           // dashboard shows, so the clicks below are guaranteed to be observed.
           for (let attempt = 0; attempt < 50; attempt += 1) {
             const status = await api<{ connection: { capturing: string[] } }>('/api/v1/status');
-            if (status.body.connection.capturing.includes('127.0.0.1')) return;
+            if (status.body.connection.capturing.includes(site.origin)) return;
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
           throw new Error('the extension never acknowledged discovery capture');
         },
         async stopDiscovery() {
-          await api('/api/v1/domains/127.0.0.1/discovery', { method: 'DELETE' });
+          await api(`/api/v1/domains/${encodeURIComponent(site.origin)}/discovery`, { method: 'DELETE' });
         },
         async generateAndApprove() {
-          await api('/api/v1/tools/generate', { method: 'POST', body: JSON.stringify({ domain: '127.0.0.1' }) });
+          await api('/api/v1/tools/generate', { method: 'POST', body: JSON.stringify({ origin: site.origin }) });
           const tools = (await api<{ tools: any[] }>('/api/v1/tools')).body.tools;
           for (const tool of tools) {
             if (tool.status !== 'approved') await api(`/api/v1/tools/${tool.id}/approve`, { method: 'POST' });

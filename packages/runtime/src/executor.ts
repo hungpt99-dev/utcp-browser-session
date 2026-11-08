@@ -2,30 +2,36 @@
  * Execution pipeline.
  *
  * Every invocation walks the same path, in this order:
- *   resolve tool -> approval -> domain allowlist -> argument validation ->
- *   destructive confirmation -> rate limit -> URL construction -> URL policy ->
+ *   resolve tool -> approval -> origin allowlist -> domain policy -> argument
+ *   validation -> confirmation -> rate limit -> URL construction -> URL policy ->
  *   size limits -> browser dispatch -> response normalization -> audit.
  *
  * There is no branch that falls back to a direct HTTP request: if the browser
  * cannot perform the call, the call fails.
+ *
+ * The permission used at execution time is the one recorded on the tool (set by
+ * classification *and* human review), clamped by the domain policy. It is never
+ * recomputed from the HTTP method at call time, so an agent cannot talk its way
+ * past a reviewed classification.
  */
 import {
   ErrorCode,
+  LIMITS,
+  PERMISSION_ORDER,
   ToolError,
+  buildRequest,
   checkRedirect,
   checkTargetUrl,
-  buildRequest,
-  classifyPermission,
-  isLoopbackDomain,
   jsonByteLength,
-  LIMITS,
   pickSafeHeaders,
   redactString,
+  requiresConfirmation,
   toErrorShape,
   validateArguments,
+  type ExecuteMessage,
   type ExecuteRequest,
   type ExecutionEnvelope,
-  type ExecuteMessage,
+  type ExecutionRecord,
   type ResultMessage,
   type ToolRecord,
 } from '@utcp-browser-session/shared';
@@ -47,11 +53,64 @@ class SlidingWindowLimiter {
     }
     existing.push(now);
     this.hits.set(key, existing);
+    // Bound the map: keys idle for more than a window cannot affect any result.
+    if (this.hits.size > 500) {
+      for (const [staleKey, timestamps] of this.hits) {
+        if (timestamps.every((ts) => ts <= windowStart)) this.hits.delete(staleKey);
+      }
+    }
     return true;
   }
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Hooks let the HTTP layer cancel a call when the client hangs up. */
+export interface ExecuteHooks {
+  onDispatched?: (dispatchId: string) => void;
+}
+
+/** Map an error code onto the category shown in the observability records. */
+function errorCategory(code: string): ExecutionRecord['errorCategory'] {
+  if (
+    [
+      ErrorCode.DOMAIN_NOT_ALLOWED,
+      ErrorCode.TOOL_NOT_APPROVED,
+      ErrorCode.TOOL_REVOKED,
+      ErrorCode.PERMISSION_DENIED,
+      ErrorCode.CONFIRMATION_REQUIRED,
+      ErrorCode.RATE_LIMITED,
+      ErrorCode.APPROVAL_REQUIRED,
+      ErrorCode.POLICY_BLOCKED,
+      ErrorCode.BUSY,
+      ErrorCode.NO_BROWSER,
+    ].includes(code as never)
+  ) {
+    return 'policy';
+  }
+  if (
+    [
+      ErrorCode.INVALID_ARGUMENTS,
+      ErrorCode.UNKNOWN_TOOL,
+      ErrorCode.INVALID_URL,
+      ErrorCode.URL_SCHEME_NOT_ALLOWED,
+      ErrorCode.CROSS_DOMAIN_BLOCKED,
+      ErrorCode.REDIRECT_BLOCKED,
+      ErrorCode.PRIVATE_ADDRESS_BLOCKED,
+      ErrorCode.REQUEST_TOO_LARGE,
+      ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+      ErrorCode.INVALID_REQUEST,
+    ].includes(code as never)
+  ) {
+    return 'validation';
+  }
+  if (code === ErrorCode.WEBSITE_AUTH_EXPIRED || code === ErrorCode.AUTH_REQUIRED) return 'auth';
+  if (code === ErrorCode.NETWORK_ERROR || code === ErrorCode.TIMEOUT || code === ErrorCode.ABORTED || code === ErrorCode.EXTENSION_DISCONNECTED) {
+    return 'transport';
+  }
+  if (code === ErrorCode.WEBSITE_ERROR || code === ErrorCode.INVALID_RESPONSE || code === ErrorCode.RESPONSE_TOO_LARGE) return 'upstream';
+  return 'internal';
+}
 
 export class Executor {
   private readonly limiter = new SlidingWindowLimiter();
@@ -65,30 +124,39 @@ export class Executor {
     this.logger = logger;
   }
 
-  async execute(request: ExecuteRequest): Promise<ExecutionEnvelope> {
+  async execute(request: ExecuteRequest, hooks: ExecuteHooks = {}): Promise<ExecutionEnvelope> {
     const startedAt = new Date();
+    const startedMs = Date.now();
     const executionId = generateId('exec');
+    const correlationId = request.correlationId ?? executionId;
     let tool: ToolRecord | undefined;
 
-    const record = {
+    const record: ExecutionRecord = {
       id: executionId,
+      correlationId,
       toolId: '',
       toolName: request.tool,
       domain: '',
+      origin: '',
       method: '',
       path: '',
       actor: request.actor,
-      outcome: 'rejected' as 'ok' | 'error' | 'rejected' | 'timeout' | 'disconnected',
-      httpStatus: null as number | null,
-      latencyMs: null as number | null,
+      outcome: 'rejected',
+      httpStatus: null,
+      latencyMs: null,
+      queuedMs: null,
       startedAt: startedAt.toISOString(),
-      finishedAt: null as string | null,
-      requestBytes: null as number | null,
-      responseBytes: null as number | null,
+      finishedAt: null,
+      requestBytes: null,
+      responseBytes: null,
       truncated: false,
-      errorCode: null as string | null,
-      errorMessage: null as string | null,
-      responsePreview: null as string | null,
+      errorCode: null,
+      errorCategory: null,
+      errorMessage: null,
+      permission: 'READ',
+      permissionDecision: 'denied',
+      approvalDecision: 'n/a',
+      responsePreview: null,
     };
 
     try {
@@ -101,8 +169,11 @@ export class Executor {
       record.toolId = tool.id;
       record.toolName = tool.fqName;
       record.domain = tool.domain;
+      record.origin = tool.origin;
       record.method = tool.method;
       record.path = tool.pathTemplate;
+      record.permission = tool.permission;
+      record.approvalDecision = tool.status === 'approved' ? 'approved' : tool.status;
 
       if (tool.status === 'draft') {
         throw new ToolError(ErrorCode.APPROVAL_REQUIRED, `Tool "${tool.fqName}" is still a draft and cannot run.`, {
@@ -112,10 +183,21 @@ export class Executor {
       if (tool.status === 'revoked') {
         throw new ToolError(ErrorCode.TOOL_REVOKED, `Tool "${tool.fqName}" has been revoked.`);
       }
-      if (!this.store.isDomainEnabled(tool.domain)) {
-        throw new ToolError(ErrorCode.DOMAIN_NOT_ALLOWED, `Domain "${tool.domain}" is not enabled.`, {
-          hint: 'Enable the domain in the Websites view before calling its tools.',
+
+      const domainConfig = this.store.getDomain(tool.origin);
+      if (!domainConfig || !domainConfig.enabled) {
+        throw new ToolError(ErrorCode.DOMAIN_NOT_ALLOWED, `Origin "${tool.origin}" is not enabled.`, {
+          hint: 'Enable the website in the Websites view before calling its tools.',
         });
+      }
+
+      // Defence in depth: the policy may have been tightened after approval.
+      if (PERMISSION_ORDER[tool.permission] > PERMISSION_ORDER[domainConfig.policy.maxPermission]) {
+        throw new ToolError(
+          ErrorCode.POLICY_BLOCKED,
+          `The domain policy for ${tool.origin} caps tools at ${domainConfig.policy.maxPermission}, but "${tool.fqName}" is ${tool.permission}.`,
+          { hint: 'Raise the domain ceiling or re-classify the tool.' },
+        );
       }
 
       const validation = validateArguments(tool.inputSchema, request.args, tool.paramLocations);
@@ -125,11 +207,10 @@ export class Executor {
         });
       }
 
-      const classification = classifyPermission(tool.method, tool.pathTemplate);
-      if (classification.level === 'DESTRUCTIVE' && request.confirm !== true) {
+      if (requiresConfirmation(tool.permission, domainConfig.policy.confirmWrites) && request.confirm !== true) {
         throw new ToolError(
           ErrorCode.CONFIRMATION_REQUIRED,
-          `"${tool.fqName}" is destructive and requires an explicit confirmation.`,
+          `"${tool.fqName}" is ${tool.permission.toLowerCase()} and requires an explicit confirmation.`,
           { hint: 'Pass confirm: true in the tool call arguments (exposed as the __confirm field) to proceed.' },
         );
       }
@@ -144,11 +225,10 @@ export class Executor {
         { pathTemplate: tool.pathTemplate, method: tool.method, paramLocations: tool.paramLocations },
         validation.value,
       );
-      const domainConfig = this.store.getDomain(tool.domain);
-      const origin =
-        domainConfig?.origin ?? (isLoopbackDomain(tool.domain) ? `http://${tool.domain}` : `https://${tool.domain}`);
+      const origin = domainConfig.origin;
       let url = `${origin}${built.path}${built.query ? `?${built.query}` : ''}`;
       record.path = `${built.path}${built.query ? `?${built.query}` : ''}`;
+      record.permissionDecision = 'allowed';
 
       const checkedUrl = checkTargetUrl(url, tool.domain, { expectedOrigin: origin });
       if (!checkedUrl.ok) {
@@ -164,7 +244,9 @@ export class Executor {
 
       const timeoutMs = Math.min(this.store.settings.defaultTimeoutMs, LIMITS.maxTimeoutMs);
 
-      let result = await this.dispatch(executionId, tool, url, bodyText, timeoutMs, domainConfig?.csrf);
+      let dispatchedAt = Date.now();
+      let result = await this.dispatch(correlationId, tool, url, bodyText, timeoutMs, domainConfig.csrf, hooks);
+      record.queuedMs = Date.now() - dispatchedAt - Math.round(result.latencyMs);
       let redirects = 0;
 
       while (REDIRECT_STATUSES.has(result.status) && redirects < LIMITS.maxRedirects) {
@@ -178,10 +260,11 @@ export class Executor {
             kind: 'request.redirect_blocked',
             severity: 'warn',
             actor: request.actor,
-            domain: tool.domain,
+            origin: tool.origin,
             toolName: tool.fqName,
+            correlationId,
             message: `Blocked a redirect away from ${tool.domain}.`,
-            detail: { to: new URL(location, url).host },
+            detail: { to: safeHost(location, url) },
           });
           throw new ToolError(ErrorCode.REDIRECT_BLOCKED, 'The website tried to redirect the request to another origin.', {
             details: { targetHost: safeHost(location, url) },
@@ -189,7 +272,9 @@ export class Executor {
         }
         redirects += 1;
         url = verdict.url.toString();
-        result = await this.dispatch(executionId, tool, url, bodyText, timeoutMs, domainConfig?.csrf);
+        dispatchedAt = Date.now();
+        result = await this.dispatch(correlationId, tool, url, bodyText, timeoutMs, domainConfig.csrf, hooks);
+        record.queuedMs = (record.queuedMs ?? 0) + (Date.now() - dispatchedAt - Math.round(result.latencyMs));
       }
       if (REDIRECT_STATUSES.has(result.status)) {
         throw new ToolError(ErrorCode.REDIRECT_BLOCKED, `More than ${LIMITS.maxRedirects} redirects; refusing to continue.`);
@@ -231,12 +316,22 @@ export class Executor {
       }
 
       if (result.status === 401) {
+        this.store.setSession(tool.origin, 'expired', 401, ErrorCode.WEBSITE_AUTH_EXPIRED);
+        this.store.audit({
+          kind: 'session.expired',
+          severity: 'warn',
+          actor: request.actor,
+          origin: tool.origin,
+          toolName: tool.fqName,
+          correlationId,
+          message: `The website answered 401 for ${tool.origin}; the browser session is no longer valid.`,
+        });
         throw new ToolError(ErrorCode.WEBSITE_AUTH_EXPIRED, `The browser session for ${tool.domain} is not authenticated.`, {
           hint: `Sign in again at ${origin} in the same browser, then retry. No other request was attempted.`,
         });
       }
       if (result.status === 403) {
-        throw new ToolError(ErrorCode.PERMISSION_DENIED, `The website refused this request for the signed-in user.`, {
+        throw new ToolError(ErrorCode.PERMISSION_DENIED, 'The website refused this request for the signed-in user.', {
           details: { status: 403, siteMessage: extractMessage(bodyValue) },
         });
       }
@@ -246,28 +341,42 @@ export class Executor {
         });
       }
 
+      this.store.setSession(tool.origin, 'ok', result.status, null);
+      this.store.touchDomain(tool.origin);
       record.outcome = 'ok';
       record.responseBytes = rawBody.length;
       record.truncated = truncated;
       record.responsePreview = redactString(rawBody.slice(0, 1500));
       record.finishedAt = new Date().toISOString();
+      record.latencyMs = Date.now() - startedMs;
 
-      this.store.addExecution({ ...record });
+      this.store.addExecution(record);
       this.store.noteToolExecution(tool.id, 'ok');
       this.store.audit({
         kind: 'tool.executed',
         severity: 'info',
         actor: request.actor,
-        domain: tool.domain,
+        origin: tool.origin,
         toolName: tool.fqName,
+        correlationId,
         message: `${tool.method} ${tool.pathTemplate} -> ${result.status} in ${Math.round(result.latencyMs)} ms`,
-        detail: { permission: tool.permission, executionId },
+        detail: { permission: tool.permission, executionId, queuedMs: record.queuedMs },
+      });
+      this.logger.info('tool.executed', {
+        executionId,
+        correlationId,
+        origin: tool.origin,
+        tool: tool.fqName,
+        status: result.status,
+        latencyMs: Math.round(record.latencyMs ?? 0),
+        permission: tool.permission,
       });
 
       const envelope: ExecutionEnvelope = {
         ok: true,
         tool: tool.fqName,
         domain: tool.domain,
+        origin: tool.origin,
         method: tool.method,
         path: record.path,
         status: result.status,
@@ -276,14 +385,19 @@ export class Executor {
         latencyMs: result.latencyMs,
         truncated,
         executionId,
+        correlationId,
       };
       if (result.statusText) envelope.statusText = result.statusText;
+      const pagination = extractPagination(tool, bodyValue);
+      if (pagination) envelope.pagination = pagination;
       return envelope;
     } catch (error) {
       const shape = toErrorShape(error);
       record.errorCode = shape.code;
+      record.errorCategory = errorCategory(shape.code);
       record.errorMessage = shape.message;
       record.finishedAt = new Date().toISOString();
+      if (record.latencyMs === null) record.latencyMs = Date.now() - startedMs;
       if (record.outcome !== 'timeout') {
         record.outcome =
           shape.code === ErrorCode.EXTENSION_DISCONNECTED
@@ -292,23 +406,34 @@ export class Executor {
               ? 'timeout'
               : classifyOutcome(shape.code);
       }
-      this.store.addExecution({ ...record });
+      if (record.outcome === 'rejected') {
+        record.permissionDecision = shape.code === ErrorCode.CONFIRMATION_REQUIRED ? 'confirmation_required' : 'denied';
+      }
+      this.store.addExecution(record);
       if (tool) this.store.noteToolExecution(tool.id, record.outcome);
       this.store.audit({
         kind: record.outcome === 'rejected' ? 'tool.rejected' : 'tool.failed',
         severity: record.outcome === 'rejected' ? 'warn' : 'error',
         actor: request.actor,
-        domain: tool?.domain ?? null,
+        origin: tool?.origin ?? null,
         toolName: tool?.fqName ?? request.tool,
+        correlationId,
         message: `${shape.code}: ${shape.message}`,
-        detail: { executionId, hint: shape.hint },
+        detail: { executionId, hint: shape.hint, category: record.errorCategory },
       });
-      this.logger.warn('tool.execution_failed', { code: shape.code, tool: tool?.fqName ?? request.tool });
+      this.logger.warn('tool.execution_failed', {
+        executionId,
+        correlationId,
+        code: shape.code,
+        category: record.errorCategory,
+        tool: tool?.fqName ?? request.tool,
+      });
 
       const envelope: ExecutionEnvelope = {
         ok: false,
         tool: tool?.fqName ?? request.tool,
         domain: tool?.domain ?? record.domain,
+        origin: tool?.origin ?? record.origin,
         method: tool?.method ?? record.method,
         path: record.path,
         status: record.httpStatus ?? 0,
@@ -317,6 +442,7 @@ export class Executor {
         latencyMs: record.latencyMs ?? 0,
         truncated: false,
         executionId,
+        correlationId,
         error: shape,
       };
       return envelope;
@@ -324,19 +450,21 @@ export class Executor {
   }
 
   private async dispatch(
-    executionId: string,
+    correlationId: string,
     tool: ToolRecord,
     url: string,
     bodyText: string | undefined,
     timeoutMs: number,
     csrf: { bootstrapPath: string; tokenField: string; header: string } | undefined,
+    hooks: ExecuteHooks,
   ): Promise<ResultMessage> {
     const message: ExecuteMessage = {
       type: 'execute',
-      id: `${executionId}:${Math.random().toString(36).slice(2, 8)}`,
+      id: `${correlationId}:${Math.random().toString(36).slice(2, 8)}`,
+      correlationId,
       method: tool.method as ExecuteMessage['method'],
       url,
-      domain: tool.domain,
+      origin: tool.origin,
       headers: { accept: 'application/json, text/plain;q=0.9, */*;q=0.8' },
       timeoutMs,
     };
@@ -345,6 +473,7 @@ export class Executor {
       message.headers['content-type'] = 'application/json';
     }
     if (csrf && tool.method !== 'GET' && tool.method !== 'HEAD') message.csrf = csrf;
+    hooks.onDispatched?.(message.id);
     return this.hub.execute(message);
   }
 }
@@ -367,6 +496,9 @@ function classifyOutcome(code: string): 'rejected' | 'error' {
     ErrorCode.PRIVATE_ADDRESS_BLOCKED,
     ErrorCode.REQUEST_TOO_LARGE,
     ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+    ErrorCode.POLICY_BLOCKED,
+    ErrorCode.BUSY,
+    ErrorCode.NO_BROWSER,
   ]);
   return rejected.has(code) ? 'rejected' : 'error';
 }
@@ -384,4 +516,23 @@ function safeHost(location: string, base: string): string {
   } catch {
     return 'unparseable';
   }
+}
+
+/** Surface pagination cursors from a response that carries them. */
+function extractPagination(
+  tool: ToolRecord,
+  body: unknown,
+): { next: string | null; total: number | null } | undefined {
+  if (!tool.pagination || !body || typeof body !== 'object') return undefined;
+  const record = body as Record<string, unknown>;
+  const nextField = tool.pagination.nextField;
+  const next = nextField && typeof record[nextField] === 'string' ? (record[nextField] as string) : null;
+  let total: number | null = null;
+  for (const key of ['total', 'totalCount', 'total_count', 'count']) {
+    if (typeof record[key] === 'number') {
+      total = record[key] as number;
+      break;
+    }
+  }
+  return { next, total };
 }

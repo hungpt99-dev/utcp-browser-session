@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -25,6 +26,7 @@ export default function Security({ api, status, onChanged }: { api: Api; status:
   const [revoked, setRevoked] = useState<ToolRecord[]>([]);
   const [clients, setClients] = useState<Array<{ clientId: string; label: string; extensionId: string; createdAt: string; lastSeenAt: string | null; revoked: boolean }>>([]);
   const [filter, setFilter] = useState<'all' | 'warn' | 'error'>('all');
+  const [chain, setChain] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [audit, tools, paired] = await Promise.all([api.audit(200), api.tools('revoked'), api.clients()]);
@@ -47,6 +49,12 @@ export default function Security({ api, status, onChanged }: { api: Api; status:
     <Box>
       <SectionHeader title="Security center" subtitle="Domains, approvals, revocations and the audit trail." />
 
+      {chain && (
+        <Alert severity={chain.startsWith('Chain intact') ? 'success' : 'warning'} sx={{ mb: 2 }} onClose={() => setChain(null)}>
+          {chain} Each event is hashed with the previous one, so an edited or removed entry breaks the chain.
+        </Alert>
+      )}
+
       <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: 'wrap', rowGap: 2 }}>
         <StatCard label="Enabled domains" value={status.stats.enabledDomains} hint="exact hostname match" />
         <StatCard label="Approved tools" value={status.stats.approved} hint="explicit human approval" />
@@ -60,6 +68,25 @@ export default function Security({ api, status, onChanged }: { api: Api; status:
           <CardContent>
             <Stack direction="row" alignItems="center" sx={{ mb: 1.5 }}>
               <Typography sx={{ fontWeight: 650, flex: 1 }}>Audit trail</Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                sx={{ mr: 1 }}
+                onClick={async () => {
+                  try {
+                    const report = await api.verifyAudit();
+                    setChain(
+                      report.ok
+                        ? `Chain intact across ${report.checked} event(s).`
+                        : `Chain broken at ${report.brokenAt ?? 'unknown'}.`,
+                    );
+                  } catch (cause) {
+                    setChain(cause instanceof Error ? cause.message : 'Verification failed.');
+                  }
+                }}
+              >
+                Verify chain
+              </Button>
               <Stack direction="row" spacing={0.5}>
                 {(['all', 'warn', 'error'] as const).map((value) => (
                   <Chip

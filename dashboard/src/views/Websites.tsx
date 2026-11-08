@@ -15,6 +15,7 @@ import {
   TableBody,
   TableCell,
   TableHead,
+  MenuItem,
   TableRow,
   TextField,
   Tooltip,
@@ -100,6 +101,19 @@ export default function Websites({
       await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Discovery control failed.');
+    }
+  };
+
+  const applyPolicy = async (
+    origin: string,
+    policy: { maxPermission?: 'READ' | 'WRITE' | 'DESTRUCTIVE'; confirmWrites?: boolean },
+  ) => {
+    try {
+      await api.patchDomain(origin, { policy });
+      await load();
+      onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not update the policy.');
     }
   };
 
@@ -201,11 +215,11 @@ export default function Websites({
       ) : (
         <Stack spacing={1.5}>
           {domains.map((domain) => {
-            const capturing = status.connection.capturing.includes(domain.domain);
-            const isOpen = expanded === domain.domain;
-            const list = endpoints[domain.domain] ?? [];
+            const capturing = status.connection.capturing.includes(domain.origin);
+            const isOpen = expanded === domain.origin;
+            const list = endpoints[domain.origin] ?? [];
             return (
-              <Card key={domain.domain}>
+              <Card key={domain.origin}>
                 <CardContent>
                   <Stack direction="row" spacing={1.5} alignItems="center">
                     <Box sx={{ flex: 1, minWidth: 0 }}>
@@ -213,22 +227,31 @@ export default function Websites({
                         <Typography sx={{ fontWeight: 650 }}>{domain.domain}</Typography>
                         <Chip size="small" label={domain.enabled ? 'enabled' : 'disabled'} color={domain.enabled ? 'success' : 'default'} variant={domain.enabled ? 'filled' : 'outlined'} sx={{ height: 19, fontSize: 10 }} />
                         {domain.deepCapture && <Chip size="small" label="schema capture" sx={{ height: 19, fontSize: 10 }} variant="outlined" />}
+                        {domain.captureEnums && <Chip size="small" label="enum sampling" sx={{ height: 19, fontSize: 10 }} variant="outlined" />}
                         {domain.csrf && <Chip size="small" label="csrf bootstrap" sx={{ height: 19, fontSize: 10 }} variant="outlined" />}
+                        {domain.session.status === 'expired' && (
+                          <Chip size="small" color="warning" label="session expired" sx={{ height: 19, fontSize: 10 }} />
+                        )}
+                        {domain.policy.maxPermission !== 'DESTRUCTIVE' && (
+                          <Chip size="small" color="info" label={`max ${domain.policy.maxPermission.toLowerCase()}`} sx={{ height: 19, fontSize: 10 }} variant="outlined" />
+                        )}
                       </Stack>
                       <Typography sx={{ fontSize: 11.5, color: 'text.secondary', mt: 0.25 }}>
-                        {domain.origin} · {domain.endpoints} endpoints · {domain.approvedTools} approved tools
+                        {domain.domain} · {domain.endpoints} endpoints · {domain.approvedTools} approved tools
+                        {domain.session.lastCheckedAt ? ` · last answer ${domain.session.lastStatus ?? '—'}` : ''}
+                        {domain.requestCount > 0 ? ` · ${domain.requestCount} calls` : ''}
                       </Typography>
                     </Box>
                     {capturing ? (
-                      <Button size="small" color="warning" startIcon={<StopIcon />} onClick={() => void toggleDiscovery(domain.domain, false)}>
+                      <Button size="small" color="warning" startIcon={<StopIcon />} onClick={() => void toggleDiscovery(domain.origin, false)}>
                         Stop discovery
                       </Button>
                     ) : (
-                      <Button size="small" startIcon={<PlayArrowIcon />} disabled={!status.connection.connected} onClick={() => void toggleDiscovery(domain.domain, true)}>
+                      <Button size="small" startIcon={<PlayArrowIcon />} disabled={!status.connection.connected} onClick={() => void toggleDiscovery(domain.origin, true)}>
                         Start discovery
                       </Button>
                     )}
-                    <Button size="small" disabled={domain.endpoints === 0} onClick={() => void generate(domain.domain)}>
+                    <Button size="small" disabled={domain.endpoints === 0} onClick={() => void generate(domain.origin)}>
                       Generate drafts
                     </Button>
                     <Button
@@ -236,20 +259,54 @@ export default function Websites({
                       color="error"
                       variant="text"
                       onClick={async () => {
-                        await api.removeDomain(domain.domain);
+                        await api.removeDomain(domain.origin);
                         await load();
                         onChanged();
                       }}
                     >
                       Disable
                     </Button>
-                    <IconButton size="small" aria-label={isOpen ? 'Hide endpoints' : 'Show endpoints'} onClick={() => setExpanded(isOpen ? null : domain.domain)}>
+                    <IconButton size="small" aria-label={isOpen ? 'Hide endpoints' : 'Show endpoints'} onClick={() => setExpanded(isOpen ? null : domain.origin)}>
                       <ExpandIcon fontSize="small" sx={{ transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
                     </IconButton>
                   </Stack>
 
                   <Collapse in={isOpen} unmountOnExit>
                     <Divider sx={{ my: 1.5 }} />
+                    <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1.5, flexWrap: 'wrap' }}>
+                      <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>Ceiling</Typography>
+                      <TextField
+                        select
+                        size="small"
+                        value={domain.policy.maxPermission}
+                        onChange={(event) => void applyPolicy(domain.origin, { maxPermission: event.target.value as 'READ' | 'WRITE' | 'DESTRUCTIVE' })}
+                        sx={{ width: 150 }}
+                      >
+                        <MenuItem value="READ">READ only</MenuItem>
+                        <MenuItem value="WRITE">up to WRITE</MenuItem>
+                        <MenuItem value="DESTRUCTIVE">everything</MenuItem>
+                      </TextField>
+                      <Tooltip title="Require __confirm on every write, not only destructive calls">
+                        <Stack direction="row" spacing={0.5} alignItems="center">
+                          <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>Confirm writes</Typography>
+                          <Switch
+                            size="small"
+                            checked={domain.policy.confirmWrites}
+                            onChange={(event) => void applyPolicy(domain.origin, { confirmWrites: event.target.checked })}
+                          />
+                        </Stack>
+                      </Tooltip>
+                      <Tooltip title="Sample short enum-like values (status/type/priority) so draft tools can list valid values">
+                        <Stack direction="row" spacing={0.5} alignItems="center">
+                          <Typography sx={{ fontSize: 12, color: 'text.secondary' }}>Enum sampling</Typography>
+                          <Switch
+                            size="small"
+                            checked={domain.captureEnums}
+                            onChange={(event) => void api.patchDomain(domain.origin, { captureEnums: event.target.checked }).then(load)}
+                          />
+                        </Stack>
+                      </Tooltip>
+                    </Stack>
                     {list.length === 0 ? (
                       <Typography sx={{ fontSize: 12.5, color: 'text.secondary' }}>
                         No endpoints recorded yet. Start discovery, then click around the site in Chrome.
@@ -262,6 +319,8 @@ export default function Websites({
                             <TableCell>Path</TableCell>
                             <TableCell>Permission</TableCell>
                             <TableCell align="right">Samples</TableCell>
+                            <TableCell>Kind</TableCell>
+                            <TableCell align="right">Confidence</TableCell>
                             <TableCell>Sources</TableCell>
                             <TableCell>Schema</TableCell>
                           </TableRow>
@@ -273,6 +332,14 @@ export default function Websites({
                               <TableCell sx={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11.5 }}>{endpoint.pathTemplate}</TableCell>
                               <TableCell><PermissionChip permission={endpoint.permission} /></TableCell>
                               <TableCell align="right" sx={{ fontSize: 12 }}>{endpoint.sampleCount}</TableCell>
+                              <TableCell sx={{ fontSize: 11, color: 'text.secondary' }}>
+                                {endpoint.kind}
+                                {endpoint.blocked ? ' (blocked)' : ''}
+                                {endpoint.pagination ? ` · ${endpoint.pagination.style}` : ''}
+                              </TableCell>
+                              <TableCell align="right" sx={{ fontSize: 11, color: endpoint.confidence < 0.45 ? 'warning.main' : 'text.secondary' }}>
+                                {Math.round(endpoint.confidence * 100)}%
+                              </TableCell>
                               <TableCell sx={{ fontSize: 11, color: 'text.secondary' }}>{endpoint.sources.join(' + ')}</TableCell>
                               <TableCell sx={{ fontSize: 11, color: 'text.secondary' }}>
                                 {endpoint.requestSchema ? 'req ' : ''}

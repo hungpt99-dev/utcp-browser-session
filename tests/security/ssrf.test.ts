@@ -34,14 +34,14 @@ describe('cross-domain and SSRF protection', () => {
 
   it('percent-encodes argument values so they cannot escape the path segment', async () => {
     harness.runtime.store.recordObservation({
-      domain: '127.0.0.1',
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/tasks/1',
       queryKeys: [],
       status: 200,
       source: 'webRequest',
     });
-    const tool = harness.runtime.store.generateDrafts('127.0.0.1').created[0];
+    const tool = harness.runtime.store.generateDrafts(harness.site.origin).created[0];
     harness.runtime.store.approveTool(tool.id, 'test');
 
     const before = extension.received.length;
@@ -62,9 +62,9 @@ describe('cross-domain and SSRF protection', () => {
   });
 
   it('refuses a tool whose domain is a private address', async () => {
-    harness.runtime.store.enableDomain('169.254.169.254', { origin: 'http://169.254.169.254' });
+    harness.runtime.store.enableDomain('http://169.254.169.254', '169.254.169.254');
     harness.runtime.store.recordObservation({
-      domain: '169.254.169.254',
+      origin: 'http://169.254.169.254',
       method: 'GET',
       path: '/latest/meta-data',
       queryKeys: [],
@@ -72,7 +72,7 @@ describe('cross-domain and SSRF protection', () => {
       source: 'webRequest',
     });
     const tool = harness.runtime.store
-      .generateDrafts('169.254.169.254')
+      .generateDrafts('http://169.254.169.254')
       .created.find((candidate) => candidate.pathTemplate === '/latest/meta-data')!;
     harness.runtime.store.approveTool(tool.id, 'test');
 
@@ -84,14 +84,14 @@ describe('cross-domain and SSRF protection', () => {
     assert.equal(result.body.ok, false);
     assert.equal(result.body.error.code, 'private_address_blocked');
     assert.equal(extension.received.length, before, 'nothing may reach the browser');
-    harness.runtime.store.disableDomain('169.254.169.254');
+    harness.runtime.store.disableDomain('http://169.254.169.254');
   });
 
   it('blocks a tool whose stored origin does not match its domain', async () => {
     // Simulates a tampered state file: the domain says one thing, the origin
     // another. The executor re-validates both on every call.
     harness.runtime.store.recordObservation({
-      domain: '127.0.0.1',
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/origin-tamper',
       queryKeys: [],
@@ -99,7 +99,7 @@ describe('cross-domain and SSRF protection', () => {
       source: 'webRequest',
     });
     const tool = harness.runtime.store
-      .generateDrafts('127.0.0.1')
+      .generateDrafts(harness.site.origin)
       .created.find((candidate) => candidate.pathTemplate === '/api/origin-tamper')!;
     harness.runtime.store.approveTool(tool.id, 'test');
 
@@ -123,7 +123,7 @@ describe('cross-domain and SSRF protection', () => {
 
   it('rejects a redirect to the cloud metadata endpoint', async () => {
     harness.runtime.store.recordObservation({
-      domain: '127.0.0.1',
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/redirect-meta',
       queryKeys: [],
@@ -131,7 +131,7 @@ describe('cross-domain and SSRF protection', () => {
       source: 'webRequest',
     });
     const tool = harness.runtime.store
-      .generateDrafts('127.0.0.1')
+      .generateDrafts(harness.site.origin)
       .created.find((candidate) => candidate.pathTemplate === '/api/redirect-meta')!;
     harness.runtime.store.approveTool(tool.id, 'test');
 

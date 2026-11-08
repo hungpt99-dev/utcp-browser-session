@@ -43,7 +43,7 @@ describe('credential leak prevention', () => {
     }));
 
     harness.runtime.store.recordObservation({
-      domain: '127.0.0.1',
+      origin: harness.site.origin,
       method: 'GET',
       path: '/api/tasks',
       queryKeys: [],
@@ -51,7 +51,7 @@ describe('credential leak prevention', () => {
       contentType: 'application/json',
       source: 'webRequest',
     });
-    const tool = harness.runtime.store.generateDrafts('127.0.0.1').created[0];
+    const tool = harness.runtime.store.generateDrafts(harness.site.origin).created[0];
     harness.runtime.store.approveTool(tool.id, 'test');
 
     const response = await harness.api('/api/v1/execute', {

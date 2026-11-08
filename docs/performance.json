@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-08T06:08:47.140Z",
+  "generatedAt": "2026-11-08T07:49:55.736Z",
   "environment": {
     "cpu": "AMD EPYC Processor (with IBPB)",
     "cores": 6,
@@ -11,38 +11,38 @@
   "samples": 200,
   "direct": {
     "count": 200,
-    "p50": 9,
-    "p95": 20.1,
-    "p99": 24.7,
-    "min": 4.5,
-    "max": 42.9,
-    "mean": 10.39
+    "p50": 11,
+    "p95": 22,
+    "p99": 34.5,
+    "min": 5.8,
+    "max": 124.2,
+    "mean": 13
   },
   "utcp": {
     "count": 200,
-    "p50": 28.92,
-    "p95": 54.95,
-    "p99": 90.57,
-    "min": 16.07,
-    "max": 114.98,
-    "mean": 32.21
+    "p50": 26,
+    "p95": 61.71,
+    "p99": 83.68,
+    "min": 15.09,
+    "max": 133.1,
+    "mean": 30.63
   },
   "overhead": {
-    "p50Ms": 19.92,
-    "ratioP50": 3.21
+    "p50Ms": 15,
+    "ratioP50": 2.36
   },
   "throughput": {
-    "utcpPerSecond": 31,
-    "measuredOverMs": 6441,
+    "utcpPerSecond": 32.6,
+    "measuredOverMs": 6127,
     "errorRate": 0
   },
   "schemaValidation": {
     "iterations": 10000,
-    "totalMs": 68.2,
-    "perCallUs": 6.8
+    "totalMs": 79.4,
+    "perCallUs": 7.9
   },
   "memory": {
-    "runtimeRssMb": 116.4,
+    "runtimeRssMb": 107.7,
     "scope": "RSS of the standalone runtime process after the run"
   },
   "note": "The per-tool rate limit was raised to its maximum of 600/min for this run; the shipped default is 60/min."

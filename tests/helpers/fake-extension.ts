@@ -13,11 +13,19 @@ interface ExecuteFrame {
   id: string;
   method: string;
   url: string;
-  domain: string;
+  origin: string;
+  correlationId?: string;
   headers: Record<string, string>;
   body?: string;
   timeoutMs: number;
   csrf?: { bootstrapPath: string; tokenField: string; header: string };
+}
+
+export interface SyncFrame {
+  type: 'sync';
+  enabledOrigins: string[];
+  deepCaptureOrigins: string[];
+  enumCaptureOrigins: string[];
 }
 
 export type ExecuteHandler = (frame: ExecuteFrame) => Promise<Record<string, unknown>> | Record<string, unknown>;
@@ -43,6 +51,7 @@ export class FakeExtension {
   clientId = '';
   socket: WebSocket | null = null;
   readonly received: ExecuteFrame[] = [];
+  readonly syncFrames: SyncFrame[] = [];
   readonly discoverySent: unknown[] = [];
   private handler: ExecuteHandler = () => ({
     type: 'result',
@@ -146,6 +155,7 @@ export class FakeExtension {
       return;
     }
     if (frame.type === 'sync') {
+      this.syncFrames.push(frame as unknown as SyncFrame);
       this.markSynced();
       connected();
       return;
@@ -165,6 +175,11 @@ export class FakeExtension {
 
   async waitForSync(): Promise<void> {
     await this.synced;
+  }
+
+  /** Most recent allowlist pushed by the runtime. */
+  lastSyncFrame(): SyncFrame | undefined {
+    return this.syncFrames.at(-1);
   }
 
   send(frame: Record<string, unknown>): void {

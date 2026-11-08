@@ -21,9 +21,10 @@ interface Status {
   clientId: string | null;
   label: string;
   lastError: string | null;
-  enabledDomains: string[];
+  enabledOrigins: string[];
   capturing: string[];
-  deepCapture: string[];
+  deepCaptureOrigins: string[];
+  enumCaptureOrigins: string[];
 }
 
 const DEFAULT_RUNTIME = 'http://127.0.0.1:8777';
@@ -32,14 +33,23 @@ async function send<T = unknown>(message: Record<string, unknown>): Promise<T> {
   return (await chrome.runtime.sendMessage(message)) as T;
 }
 
-function activeDomain(url: string | undefined): string | null {
+function activeOrigin(url: string | undefined): string | null {
   if (!url) return null;
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    return parsed.hostname;
+    return parsed.origin;
   } catch {
     return null;
+  }
+}
+
+/** `https://app.example.com:8443` -> `app.example.com` */
+function hostOf(origin: string): string {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return origin;
   }
 }
 
@@ -69,7 +79,7 @@ export default function App() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [refresh]);
 
-  const domain = activeDomain(tabUrl);
+  const origin = activeOrigin(tabUrl);
 
   const pair = async () => {
     setBusy(true);
@@ -85,20 +95,19 @@ export default function App() {
   };
 
   const enableCurrentSite = async () => {
-    if (!domain) return;
+    if (!origin) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const origin = `${new URL(tabUrl!).protocol}//${domain}/*`;
-      const granted = await chrome.permissions.request({ origins: [origin] });
+      const granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
       if (!granted) {
-        setError(`Chrome did not grant access to ${domain}.`);
+        setError(`Chrome did not grant access to ${hostOf(origin)}.`);
         return;
       }
-      const result = await send<{ ok: boolean }>({ type: 'ubs:intent', action: 'enable_domain', domain });
-      if (!result?.ok) setError('The runtime is not connected, so the domain could not be enabled.');
-      else setNotice(`${domain} enabled. Start discovery from the dashboard to record its API.`);
+      const result = await send<{ ok: boolean }>({ type: 'ubs:intent', action: 'enable_origin', origin });
+      if (!result?.ok) setError('The runtime is not connected, so the site could not be enabled.');
+      else setNotice(`${hostOf(origin)} enabled. Start discovery to record its API.`);
       await refresh();
     } finally {
       setBusy(false);
@@ -106,7 +115,12 @@ export default function App() {
   };
 
   const toggleDiscovery = async (target: string, on: boolean) => {
-    await send({ type: 'ubs:intent', action: on ? 'discovery_start' : 'discovery_stop', domain: target });
+    const result = await send<{ ok: boolean; error?: string }>({
+      type: 'ubs:intent',
+      action: on ? 'discovery_start' : 'discovery_stop',
+      origin: target,
+    });
+    if (on && result && result.ok === false) setError(result.error ?? 'Discovery could not start.');
     await refresh();
   };
 
@@ -201,7 +215,7 @@ export default function App() {
             <Box>
               <MessageRow label="Runtime" value={status.runtimeUrl} />
               <MessageRow label="Client" value={status.clientId ?? '—'} mono />
-              <MessageRow label="Domains" value={`${status.enabledDomains.length} enabled`} />
+              <MessageRow label="Domains" value={`${status.enabledOrigins.length} enabled`} />
             </Box>
 
             <Divider />
@@ -210,22 +224,22 @@ export default function App() {
               <Typography sx={{ fontSize: 11, letterSpacing: '.08em', textTransform: 'uppercase', color: 'text.secondary', mb: 0.75 }}>
                 This tab
               </Typography>
-              {domain ? (
+              {origin ? (
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Box sx={{ flex: 1, minWidth: 0 }}>
                     <Typography sx={{ fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {domain}
+                      {hostOf(origin)}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      {status.enabledDomains.includes(domain) ? 'Approved for tools' : 'Not approved yet'}
+                      {status.enabledOrigins.includes(origin) ? 'Approved for tools' : 'Not approved yet'}
                     </Typography>
                   </Box>
-                  {status.enabledDomains.includes(domain) ? (
+                  {status.enabledOrigins.includes(origin) ? (
                     <Tooltip title="Record this site's API while you use it">
                       <Switch
                         size="small"
-                        checked={status.capturing.includes(domain)}
-                        onChange={(event) => void toggleDiscovery(domain, event.target.checked)}
+                        checked={status.capturing.includes(origin)}
+                        onChange={(event) => void toggleDiscovery(origin, event.target.checked)}
                       />
                     </Tooltip>
                   ) : (
@@ -241,7 +255,7 @@ export default function App() {
               )}
             </Box>
 
-            {status.enabledDomains.length > 0 && (
+            {status.enabledOrigins.length > 0 && (
               <>
                 <Divider />
                 <Box>
@@ -249,13 +263,13 @@ export default function App() {
                     Approved domains
                   </Typography>
                   <Stack spacing={0.5}>
-                    {status.enabledDomains.map((item) => (
+                    {status.enabledOrigins.map((item) => (
                       <Stack key={item} direction="row" spacing={1} alignItems="center">
                         <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <Typography sx={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item}</Typography>
+                          <Typography sx={{ fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{hostOf(item)}</Typography>
                           <Typography variant="caption" color="text.secondary">
                             {status.capturing.includes(item) ? 'Capturing API traffic' : 'Idle'}
-                            {status.deepCapture.includes(item) ? ' · schema capture on' : ''}
+                            {status.deepCaptureOrigins.includes(item) ? ' · schema capture on' : ''}
                           </Typography>
                         </Box>
                         <Switch

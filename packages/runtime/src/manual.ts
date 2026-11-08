@@ -49,7 +49,7 @@ export function buildManual(store: Store, options: ManualOptions): UtcpManualDoc
   const tokenVariable = options.tokenVariable ?? TOKEN_VARIABLE;
   const tools = store
     .listTools({ status: 'approved' })
-    .filter((tool) => store.isDomainEnabled(tool.domain));
+    .filter((tool) => store.isDomainEnabled(tool.origin));
 
   return {
     utcp_version: UTCP_VERSION,
@@ -72,6 +72,7 @@ export function toUtcpTool(tool: ToolRecord, runtimeUrl: string, tokenVariable: 
       pairing_token: `\${${tokenVariable}}`,
       tool: tool.fqName,
       domain: tool.domain,
+      origin: tool.origin,
       method: tool.method,
       path_template: tool.pathTemplate,
       param_locations: tool.paramLocations,

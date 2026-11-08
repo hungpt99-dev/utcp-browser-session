@@ -4,6 +4,7 @@ import type {
   DomainRecord,
   ExecutionRecord,
   ToolRecord,
+  WorkflowProposal,
 } from '@utcp-browser-session/shared';
 
 export interface RuntimeStatus {
@@ -14,7 +15,16 @@ export interface RuntimeStatus {
     connected: boolean;
     client: { clientId: string; label: string; connectedAt: string } | null;
     capturing: string[];
-    counters: { discoveryFrames: number; observationsIngested: number; observationsDropped: number; resultsReceived: number };
+    counters: {
+      discoveryFrames: number;
+      observationsIngested: number;
+      observationsDropped: number;
+      resultsReceived: number;
+      callsQueued: number;
+      callsRejectedBusy: number;
+      cancellations: number;
+      sessionExpiredReports: number;
+    };
   };
   stats: {
     domains: number;
@@ -26,9 +36,28 @@ export interface RuntimeStatus {
     revoked: number;
     executions: number;
     clients: number;
+    workflows: number;
+    expiredSessions: number;
   };
-  settings: { manualName: string; defaultTimeoutMs: number; maxResponseBytes: number; rateLimitPerMinute: number };
+  settings: {
+    manualName: string;
+    defaultTimeoutMs: number;
+    maxResponseBytes: number;
+    rateLimitPerMinute: number;
+    maxInFlight: number;
+    maxQueue: number;
+  };
   tokenVariable: string;
+}
+
+export interface Metrics {
+  browserLatencyMs: { count: number; p50: number; p95: number; p99: number; max: number };
+  queueWaitMs: { count: number; p50: number; p95: number; p99: number; max: number };
+  inFlight: number;
+  queued: number;
+  counters: RuntimeStatus['connection']['counters'];
+  memory: number;
+  uptimeSeconds: number;
 }
 
 export interface DomainSummary extends DomainRecord {
@@ -83,6 +112,10 @@ export class Api {
     return this.request<RuntimeStatus>('/api/v1/status');
   }
 
+  metrics(): Promise<Metrics> {
+    return this.request<Metrics>('/api/v1/metrics');
+  }
+
   domains(): Promise<{ domains: DomainSummary[] }> {
     return this.request('/api/v1/domains');
   }
@@ -90,35 +123,55 @@ export class Api {
   addDomain(input: {
     domain: string;
     deepCapture: boolean;
+    captureEnums?: boolean;
     csrf?: { bootstrapPath: string; tokenField: string; header: string };
+    policy?: { maxPermission?: 'READ' | 'WRITE' | 'DESTRUCTIVE'; confirmWrites?: boolean; blockedPathPrefixes?: string[] };
   }): Promise<{ domain: DomainRecord }> {
     return this.request('/api/v1/domains', { method: 'POST', body: JSON.stringify(input) });
   }
 
-  removeDomain(domain: string): Promise<{ ok: boolean }> {
-    return this.request(`/api/v1/domains/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+  patchDomain(
+    origin: string,
+    patch: {
+      deepCapture?: boolean;
+      captureEnums?: boolean;
+      policy?: { maxPermission?: 'READ' | 'WRITE' | 'DESTRUCTIVE'; confirmWrites?: boolean; blockedPathPrefixes?: string[] };
+    },
+  ): Promise<{ domain: DomainRecord }> {
+    return this.request(`/api/v1/domains/${encodeURIComponent(origin)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
   }
 
-  startDiscovery(domain: string): Promise<{ ok: boolean }> {
-    return this.request(`/api/v1/domains/${encodeURIComponent(domain)}/discovery`, { method: 'POST' });
+  removeDomain(origin: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/v1/domains/${encodeURIComponent(origin)}`, { method: 'DELETE' });
   }
 
-  stopDiscovery(domain: string): Promise<{ ok: boolean }> {
-    return this.request(`/api/v1/domains/${encodeURIComponent(domain)}/discovery`, { method: 'DELETE' });
+  startDiscovery(origin: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/v1/domains/${encodeURIComponent(origin)}/discovery`, { method: 'POST' });
   }
 
-  endpoints(domain?: string): Promise<{ endpoints: DiscoveredEndpointRecord[] }> {
-    return this.request(`/api/v1/endpoints${domain ? `?domain=${encodeURIComponent(domain)}` : ''}`);
+  stopDiscovery(origin: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/v1/domains/${encodeURIComponent(origin)}/discovery`, { method: 'DELETE' });
   }
 
-  tools(status?: string): Promise<{ tools: ToolRecord[] }> {
-    return this.request(`/api/v1/tools${status ? `?status=${status}` : ''}`);
+  endpoints(origin?: string): Promise<{ endpoints: DiscoveredEndpointRecord[] }> {
+    return this.request(`/api/v1/endpoints${origin ? `?origin=${encodeURIComponent(origin)}` : ''}`);
   }
 
-  generate(domain: string, endpointKeys?: string[]): Promise<{ created: ToolRecord[]; skipped: string[] }> {
+  tools(status?: string, origin?: string): Promise<{ tools: ToolRecord[] }> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (origin) params.set('origin', origin);
+    const query = params.toString();
+    return this.request(`/api/v1/tools${query ? `?${query}` : ''}`);
+  }
+
+  generate(origin: string, endpointKeys?: string[]): Promise<{ created: ToolRecord[]; skipped: string[] }> {
     return this.request('/api/v1/tools/generate', {
       method: 'POST',
-      body: JSON.stringify({ domain, endpointKeys }),
+      body: JSON.stringify({ origin, endpointKeys }),
     });
   }
 
@@ -135,6 +188,13 @@ export class Api {
   }
 
   renameTool(id: string, patch: { name?: string; description?: string }): Promise<{ tool: ToolRecord }> {
+    return this.request(`/api/v1/tools/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+  }
+
+  patchTool(
+    id: string,
+    patch: { name?: string; description?: string; permission?: 'READ' | 'WRITE' | 'DESTRUCTIVE' },
+  ): Promise<{ tool: ToolRecord }> {
     return this.request(`/api/v1/tools/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
   }
 
@@ -164,6 +224,22 @@ export class Api {
 
   audit(limit = 100): Promise<{ events: AuditEvent[] }> {
     return this.request(`/api/v1/audit?limit=${limit}`);
+  }
+
+  verifyAudit(): Promise<{ ok: boolean; checked: number; brokenAt: string | null }> {
+    return this.request('/api/v1/audit/verify');
+  }
+
+  workflows(status?: string): Promise<{ workflows: WorkflowProposal[] }> {
+    return this.request(`/api/v1/workflows${status ? `?status=${status}` : ''}`);
+  }
+
+  discoverWorkflows(): Promise<{ proposals: WorkflowProposal[]; total: number }> {
+    return this.request('/api/v1/workflows/discover', { method: 'POST' });
+  }
+
+  setWorkflowStatus(id: string, action: 'approve' | 'reject'): Promise<{ workflow: WorkflowProposal }> {
+    return this.request(`/api/v1/workflows/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
   }
 
   manual(): Promise<{ utcp_version: string; manual_version: string; tools: unknown[] }> {

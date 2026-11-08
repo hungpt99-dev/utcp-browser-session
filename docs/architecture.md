@@ -138,16 +138,31 @@ construction). The only network hop is step 8 → the browser.
 erDiagram
     DOMAIN ||--o{ ENDPOINT : "discovered on"
     DOMAIN ||--o{ TOOL : "bound to"
+    DOMAIN ||--o{ WORKFLOW : "proposed for"
     ENDPOINT ||--o| TOOL : "generates"
     TOOL ||--o{ EXECUTION : "records"
+    TOOL ||--o{ WORKFLOW_STEP : "appears in"
     CLIENT ||--o{ EXECUTION : "browser"
 
-    DOMAIN { string domain string origin bool enabled bool deepCapture }
-    ENDPOINT { string key string method string pathTemplate json requestSchema json responseSchema }
-    TOOL { string fqName string permission string status json inputSchema string endpointKey }
-    EXECUTION { string outcome int httpStatus int latencyMs string errorCode }
+    DOMAIN { string origin PK string domain bool enabled json policy json session }
+    ENDPOINT { string key PK string origin string method string pathTemplate string kind float confidence json accum }
+    TOOL { string fqName string origin string permission string status string kind float confidence }
+    EXECUTION { string id string correlationId string outcome string errorCategory int latencyMs int queuedMs }
+    WORKFLOW { string id string origin string status int occurrences float confidence }
     CLIENT { string clientId string extensionId json publicKeyJwk }
 ```
+
+**The origin is the key.** `scheme://host[:port]` identifies a domain record, its
+endpoints, its tools, its policy, its session state and its audit entries. The
+hostname is stored alongside and is still the check applied to every outgoing
+request. Two applications on `127.0.0.1` with different ports are two domains in
+every sense — before the audit they collided, because lookups used the hostname.
+
+**Two storage shapes.** Configuration (domains, tools, clients, workflows) lives
+in `state.json` and is written atomically when it changes. The two append-only
+streams — executions and audit events — live in rotated NDJSON files, because a
+tool call must not pay for rewriting the whole document (see
+`docs/audit-report.md` §4 and `docs/performance.md`).
 
 ## Design decisions and their trade-offs
 
@@ -155,9 +170,9 @@ erDiagram
 | --- | --- | --- |
 | Service-worker `fetch` instead of CDP `Network` | No `debugger` permission, no "Chrome is being debugged" banner, no raw traffic interception | No access to response headers Chrome hides, no streaming bodies |
 | Opt-in MAIN-world tap for schemas | MV3 `webRequest` cannot see bodies | Page CSP can block it on strict sites; degrades to method/path only |
-| Exact hostname + pinned origin | Prevents cross-domain and port-swap tricks | Sites served on several hosts need several entries |
+| Origin as the identity, hostname as the check | Two apps on one host stay isolated; port-swap tricks are refused | Sites served on several hosts need several entries (by design) |
 | All tools start as drafts | Discovery is noisy; a human must recognise intent | One approval step per tool |
-| JSON state file, not SQLite | No native module, no migrations, easy to inspect and diff | Single-writer, whole-file rewrites; fine at thousands of records |
+| JSON state file + NDJSON event log, not SQLite | No native module, no migrations, easy to inspect and diff; appends keep the hot path at ~0.25 ms per call | Single-writer; rotation bounds the log instead of the database |
 | JSON state file, not a database *service* | Zero deployment | Not multi-user |
 | ECDSA pairing keys | The runtime never holds a credential that can impersonate the browser | Slightly more code than a shared secret |
 | Provider talks HTTP to the runtime | Keeps the transport stateless and testable; any UTCP client can do the same | One extra localhost hop per call |

@@ -45,6 +45,8 @@ export const RUNTIME_DEFAULTS = {
   defaultTimeoutMs: LIMITS.defaultTimeoutMs,
   maxResponseBytes: LIMITS.maxResponseBytes,
   rateLimitPerMinute: LIMITS.rateLimitPerMinute,
+  maxInFlight: LIMITS.maxInFlight,
+  maxQueue: LIMITS.maxQueue,
   allowHttpLocalhost: true,
 } as const;
 

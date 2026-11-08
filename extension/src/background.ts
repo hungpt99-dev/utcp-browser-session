@@ -16,7 +16,6 @@ import {
   ErrorCode,
   LIMITS,
   checkTargetUrl,
-  normalizeDomain,
   type ExecuteMessage,
   type ResultMessage,
 } from '@utcp-browser-session/shared';
@@ -49,8 +48,15 @@ async function state(): Promise<ExtensionState> {
 }
 
 const capturing = () => new Set(cache?.capturing ?? []);
-const deepCapture = () => new Set(cache?.deepCapture ?? []);
-const collector = new DiscoveryCollector(capturing, deepCapture);
+const deepCapture = () => new Set(cache?.deepCaptureOrigins ?? []);
+const enumCapture = () => new Set(cache?.enumCaptureOrigins ?? []);
+const collector = new DiscoveryCollector(capturing, deepCapture, enumCapture);
+
+/** In-flight browser requests, so a `cancel` frame can abort the right fetch. */
+const inflight = new Map<string, AbortController>();
+const cancelled = new Set<string>();
+/** Last session state reported per origin, to avoid spamming the runtime. */
+const sessionState = new Map<string, 'ok' | 'expired'>();
 
 /**
  * Minimal introspection surface used by the E2E tests and by `chrome://extensions`
@@ -61,13 +67,13 @@ const collector = new DiscoveryCollector(capturing, deepCapture);
   capturing: [...capturing()],
   deepCapture: [...deepCapture()],
   buffered: collector.size,
-  enabledDomains: cache?.enabledDomains ?? [],
+  enabledOrigins: cache?.enabledOrigins ?? [],
   tapMessages,
   tapAccepted,
   drops: { ...collector.drops },
   lastExecute,
   syncLog: syncLog.slice(-5),
-  stored: (await getState()).enabledDomains,
+  stored: (await getState()).enabledOrigins,
 });
 
 // ---------------------------------------------------------------------------
@@ -171,13 +177,15 @@ async function handleFrame(raw: string): Promise<void> {
       return;
     }
     case 'sync': {
-      const enabledDomains = Array.isArray(frame.enabledDomains) ? (frame.enabledDomains as string[]) : [];
-      const deep = Array.isArray(frame.deepCapture) ? (frame.deepCapture as string[]) : [];
-      syncLog.push(`${enabledDomains.join('|')}#${deep.join('|')}`);
+      const enabledOrigins = Array.isArray(frame.enabledOrigins) ? (frame.enabledOrigins as string[]) : [];
+      const deep = Array.isArray(frame.deepCaptureOrigins) ? (frame.deepCaptureOrigins as string[]) : [];
+      const enums = Array.isArray(frame.enumCaptureOrigins) ? (frame.enumCaptureOrigins as string[]) : [];
+      syncLog.push(`${enabledOrigins.join('|')}#${deep.join('|')}`);
       await setState({
-        enabledDomains,
-        deepCapture: deep,
-        capturing: (cache?.capturing ?? []).filter((domain) => enabledDomains.includes(domain)),
+        enabledOrigins,
+        deepCaptureOrigins: deep,
+        enumCaptureOrigins: enums,
+        capturing: (cache?.capturing ?? []).filter((origin) => enabledOrigins.includes(origin)),
         lastError: null,
         lastConnectedAt: new Date().toISOString(),
       });
@@ -193,27 +201,40 @@ async function handleFrame(raw: string): Promise<void> {
       void handleExecute(frame as unknown as ExecuteMessage);
       return;
     case 'discovery_start': {
-      const domain = normalizeDomain(String(frame.domain ?? ''));
-      if (!domain) return;
+      const origin = String(frame.origin ?? '');
+      if (!/^https?:\/\//.test(origin)) return;
       const nextCapturing = new Set(cache?.capturing ?? []);
-      nextCapturing.add(domain);
-      // The runtime already knows whether schema capture is on for this domain;
+      nextCapturing.add(origin);
+      // The runtime already knows whether schema capture is on for this origin;
       // trusting the frame closes the window where `sync` has not arrived yet.
-      const nextDeep = new Set(cache?.deepCapture ?? []);
-      if (frame.deepCapture === true) nextDeep.add(domain);
-      await setState({ capturing: [...nextCapturing], deepCapture: [...nextDeep] });
+      const nextDeep = new Set(cache?.deepCaptureOrigins ?? []);
+      if (frame.deepCapture === true) nextDeep.add(origin);
+      const nextEnums = new Set(cache?.enumCaptureOrigins ?? []);
+      if (frame.captureEnums === true) nextEnums.add(origin);
+      await setState({
+        capturing: [...nextCapturing],
+        deepCaptureOrigins: [...nextDeep],
+        enumCaptureOrigins: [...nextEnums],
+      });
       cache = await getState();
       await refreshWebRequestListeners();
       void publishStatus();
       return;
     }
     case 'discovery_stop': {
-      const domain = normalizeDomain(String(frame.domain ?? ''));
+      const origin = String(frame.origin ?? '');
       const next = new Set(cache?.capturing ?? []);
-      next.delete(domain);
+      next.delete(origin);
       await setState({ capturing: [...next] });
       cache = await getState();
       void publishStatus();
+      return;
+    }
+    case 'cancel': {
+      const id = String(frame.id ?? '');
+      cancelled.add(id);
+      inflight.get(id)?.abort();
+      inflight.delete(id);
       return;
     }
     case 'ping':
@@ -265,16 +286,25 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
   lastExecute = { url: message.url };
 
   try {
-    if (!current.enabledDomains.includes(message.domain)) {
+    if (!current.enabledOrigins.includes(message.origin)) {
       send(
         resultFrame(message.id, {
-          error: { code: ErrorCode.DOMAIN_NOT_ALLOWED, message: `This browser has not been authorised for ${message.domain}.` },
+          error: { code: ErrorCode.DOMAIN_NOT_ALLOWED, message: `This browser has not been authorised for ${message.origin}.` },
         }),
       );
       return;
     }
 
-    const verdict = checkTargetUrl(message.url, message.domain);
+    let hostname: string;
+    try {
+      hostname = new URL(message.url).hostname;
+    } catch {
+      send(resultFrame(message.id, { error: { code: ErrorCode.INVALID_URL, message: 'The request URL is not parseable.' } }));
+      return;
+    }
+    // Both checks are independent: the URL must be on the allowed origin *and*
+    // the hostname must be what the runtime said it would be.
+    const verdict = checkTargetUrl(message.url, hostname, { expectedOrigin: message.origin });
     if (!verdict.ok || !verdict.url) {
       send(
         resultFrame(message.id, {
@@ -286,7 +316,7 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
 
     const headers: Record<string, string> = { ...message.headers };
     if (message.csrf && message.method !== 'GET' && message.method !== 'HEAD') {
-      const token = await fetchCsrfToken(verdict.url.origin, message.domain, message.csrf);
+      const token = await fetchCsrfToken(verdict.url.origin, hostname, message.csrf);
       if (!token) {
         send(
           resultFrame(message.id, {
@@ -303,6 +333,7 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
     }
 
     const controller = new AbortController();
+    inflight.set(message.id, controller);
     const timer = setTimeout(() => controller.abort(), message.timeoutMs);
     let response: Response;
     try {
@@ -317,6 +348,7 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
       });
     } finally {
       clearTimeout(timer);
+      inflight.delete(message.id);
     }
 
     // `redirect: 'manual'` yields an opaque redirect: the browser will not let
@@ -357,14 +389,32 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
       }),
     );
     lastExecute = { url: message.url, status: response.status };
+
+    // Tell the runtime what the website actually answered, so an expired
+    // session shows up in the dashboard without the runtime ever seeing a cookie.
+    const nextSession = response.status === 401 ? 'expired' : response.status < 400 ? 'ok' : null;
+    if (nextSession && sessionState.get(message.origin) !== nextSession) {
+      sessionState.set(message.origin, nextSession);
+      send({
+        type: 'session',
+        origin: message.origin,
+        status: nextSession,
+        httpStatus: response.status,
+        at: Date.now(),
+      });
+    }
   } catch (error) {
     lastExecute = { url: message.url, error: `${error instanceof Error ? `${error.name}: ${error.message}` : 'unknown'}` };
+    inflight.delete(message.id);
     const aborted = error instanceof DOMException && error.name === 'AbortError';
+    const wasCancelled = cancelled.delete(message.id);
     send(
       resultFrame(message.id, {
         latencyMs: Date.now() - started,
         error: aborted
-          ? { code: ErrorCode.TIMEOUT, message: `The request did not finish within ${message.timeoutMs} ms.` }
+          ? wasCancelled
+            ? { code: ErrorCode.ABORTED, message: 'The call was cancelled.' }
+            : { code: ErrorCode.TIMEOUT, message: `The request did not finish within ${message.timeoutMs} ms.` }
           : {
               code: ErrorCode.NETWORK_ERROR,
               message: `The browser could not complete the request (${error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'}).`,
@@ -381,12 +431,18 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
 
 async function refreshWebRequestListeners(): Promise<void> {
   const current = await state();
+  // Chrome match patterns cannot contain a port, and a pattern without one
+  // covers every port on that host. The collector still matches the exact
+  // origin, so the coarser filter is only a pre-filter.
   const origins = new Set<string>();
-  for (const domain of current.enabledDomains) {
-    const scheme = domain.startsWith('127.') || domain === 'localhost' ? 'http' : 'https';
-    origins.add(`${scheme}://${domain}/*`);
+  for (const origin of current.enabledOrigins) {
+    try {
+      const parsed = new URL(origin);
+      origins.add(`${parsed.protocol}//${parsed.hostname}/*`);
+    } catch {
+      /* ignore a malformed origin; the runtime validates them anyway */
+    }
   }
-  for (const origin of ['http://127.0.0.1/*', 'http://localhost/*']) origins.add(origin);
 
   const granted = await chrome.permissions.getAll();
   const allowed = new Set(granted.origins ?? []);
@@ -467,9 +523,10 @@ async function statusSnapshot() {
     label: current.label,
     lastError: current.lastError,
     lastConnectedAt: current.lastConnectedAt,
-    enabledDomains: current.enabledDomains,
+    enabledOrigins: current.enabledOrigins,
     capturing: current.capturing,
-    deepCapture: current.deepCapture,
+    deepCaptureOrigins: current.deepCaptureOrigins,
+    enumCaptureOrigins: current.enumCaptureOrigins,
     extensionId: chrome.runtime.id,
   };
 }
@@ -542,7 +599,17 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
       return;
     }
     if (type === 'ubs:intent') {
-      const ok = send({ type: 'intent', action: message.action, domain: message.domain, deepCapture: message.deepCapture });
+      // The popup has no runtime token; it asks this authenticated socket to act.
+      if (!connected) {
+        respond({ ok: false, error: 'The runtime is not connected. Reconnect, then try again.' });
+        return;
+      }
+      const ok = send({
+        type: 'intent',
+        action: message.action,
+        origin: message.origin,
+        deepCapture: message.deepCapture,
+      });
       respond({ ok });
       return;
     }

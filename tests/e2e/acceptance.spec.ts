@@ -58,14 +58,14 @@ test('AC-03: discovery captures the fixture API while the user browses', async (
   const endpoints = () => world.api<{ endpoints: any[] }>('/api/v1/endpoints').then((result) => result.body.endpoints);
 
   await expect
-    .poll(async () => (await endpoints()).map((endpoint) => endpoint.key), { timeout: 20_000 })
+    .poll(async () => (await endpoints()).map((endpoint) => endpoint.key.split(' ').slice(1).join(' ')), { timeout: 20_000 })
     .toEqual(expect.arrayContaining(['GET /api/tasks', 'POST /api/tasks', 'GET /api/tasks/{id}', 'DELETE /api/tasks/{id}']));
 
   // The page tap reports structural shapes only; wait for them to be merged in.
   await expect
     .poll(
       async () => {
-        const create = (await endpoints()).find((endpoint) => endpoint.key === 'POST /api/tasks');
+        const create = (await endpoints()).find((endpoint) => endpoint.key.endsWith('POST /api/tasks'));
         return Boolean(create?.requestSchema && create?.responseSchema);
       },
       { timeout: 20_000 },
@@ -73,7 +73,7 @@ test('AC-03: discovery captures the fixture API while the user browses', async (
     .toBe(true);
 
   const all = await endpoints();
-  const create = all.find((endpoint) => endpoint.key === 'POST /api/tasks');
+  const create = all.find((endpoint) => endpoint.key.endsWith('POST /api/tasks'));
   expect(create.permission).toBe('WRITE');
   expect(create.sources).toContain('page-tap');
 
@@ -217,26 +217,26 @@ test('AC-07: an expired session yields a reconnect instruction and no fallback',
 });
 
 test('AC-08: an unauthorised domain never reaches the target server', async ({ world }) => {
-  const domain = 'attacker.invalid';
+  const origin = 'https://attacker.invalid';
   await world.api('/api/v1/domains', {
     method: 'POST',
-    body: JSON.stringify({ domain, deepCapture: false }),
+    body: JSON.stringify({ domain: 'attacker.invalid', deepCapture: false }),
   });
   world.runtime.store.recordObservation({
-    domain,
+    origin,
     method: 'GET',
     path: '/api/steal',
     queryKeys: [],
     status: 200,
     source: 'webRequest',
   });
-  const draft = world.runtime.store.generateDrafts(domain).created[0];
+  const draft = world.runtime.store.generateDrafts(origin).created[0];
   expect(draft).toBeTruthy();
   world.runtime.store.approveTool(draft.id, 'test');
 
   // Revoking the domain must revoke its tools, and the request must be refused
   // before anything is dispatched to the browser.
-  await world.api(`/api/v1/domains/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+  await world.api(`/api/v1/domains/${encodeURIComponent(origin)}`, { method: 'DELETE' });
 
   const requestsBefore = world.site.getRequestLog().length;
   const executionsBefore = (await world.api<{ executions: any[] }>('/api/v1/executions?limit=100')).body.executions.length;
@@ -251,7 +251,7 @@ test('AC-08: an unauthorised domain never reaches the target server', async ({ w
   const executions = (await world.api<{ executions: any[] }>('/api/v1/executions?limit=100')).body.executions;
   expect(executions.length).toBe(executionsBefore + 1);
   expect(executions[0].outcome).toBe('rejected');
-  expect(executions[0].domain).toBe(domain);
+  expect(executions[0].origin).toBe(origin);
 
   const audit = await world.api<{ events: any[] }>('/api/v1/audit?limit=50');
   expect(audit.body.events.some((event) => event.kind === 'tool.rejected')).toBe(true);
@@ -289,7 +289,7 @@ test('AC-10: the runtime survives a timeout and returns a structured error', asy
 
   world.runtime.store.updateSettings({ defaultTimeoutMs: 1000 });
   world.runtime.store.recordObservation({
-    domain: '127.0.0.1',
+    origin: world.site.origin,
     method: 'GET',
     path: '/api/slow',
     queryKeys: ['ms'],
@@ -297,7 +297,7 @@ test('AC-10: the runtime survives a timeout and returns a structured error', asy
     source: 'webRequest',
   });
   const draft = world.runtime.store
-    .generateDrafts('127.0.0.1')
+    .generateDrafts(world.site.origin)
     .created.find((tool) => tool.pathTemplate === '/api/slow')!;
   world.runtime.store.approveTool(draft.id, 'test');
 

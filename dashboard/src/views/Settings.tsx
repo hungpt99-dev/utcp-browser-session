@@ -28,6 +28,8 @@ export default function Settings({
     defaultTimeoutMs: status.settings.defaultTimeoutMs,
     maxResponseBytes: status.settings.maxResponseBytes,
     rateLimitPerMinute: status.settings.rateLimitPerMinute,
+    maxInFlight: status.settings.maxInFlight,
+    maxQueue: status.settings.maxQueue,
   });
   const [manual, setManual] = useState<unknown>(null);
   const [report, setReport] = useState<{ ok: boolean; errors: string[]; warnings: string[]; toolCount: number } | null>(null);
@@ -40,6 +42,8 @@ export default function Settings({
       defaultTimeoutMs: status.settings.defaultTimeoutMs,
       maxResponseBytes: status.settings.maxResponseBytes,
       rateLimitPerMinute: status.settings.rateLimitPerMinute,
+      maxInFlight: status.settings.maxInFlight,
+      maxQueue: status.settings.maxQueue,
     });
   }, [status.settings]);
 
@@ -93,6 +97,22 @@ export default function Settings({
                 label="Rate limit (calls / minute / tool)"
                 value={form.rateLimitPerMinute}
                 onChange={(event) => setForm({ ...form, rateLimitPerMinute: Number(event.target.value) })}
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="Max calls in flight"
+                value={form.maxInFlight}
+                onChange={(event) => setForm({ ...form, maxInFlight: Number(event.target.value) })}
+                helperText="Extra calls queue instead of hitting the browser at once."
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="Max queued calls"
+                value={form.maxQueue}
+                onChange={(event) => setForm({ ...form, maxQueue: Number(event.target.value) })}
+                helperText="Beyond this the runtime answers busy rather than buffering."
               />
               <Box>
                 <Button variant="contained" onClick={() => void save()}>

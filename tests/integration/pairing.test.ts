@@ -157,15 +157,15 @@ describe('extension handshake', () => {
       extension.close();
       return { type: 'result', id: '', ok: true, status: 200, headers: {}, body: '{}', latencyMs: 1, truncated: false, bodyEncoding: 'utf8' };
     });
-    harness.runtime.store.enableDomain('127.0.0.1', { origin: 'http://127.0.0.1:1' });
+    harness.runtime.store.enableDomain('http://127.0.0.1:1', '127.0.0.1');
     const endpoint = harness.runtime.store.recordObservation({
-      domain: '127.0.0.1',
+      origin: 'http://127.0.0.1:1',
       method: 'GET',
       path: '/api/x',
       queryKeys: [],
       source: 'webRequest',
     });
-    const tool = harness.runtime.store.generateDrafts('127.0.0.1').created[0];
+    const tool = harness.runtime.store.generateDrafts('http://127.0.0.1:1').created[0];
     harness.runtime.store.approveTool(tool.id, 'test');
 
     const envelope = await harness.runtime.executor.execute({ tool: tool.fqName, args: {}, confirm: false, actor: 'utcp' });

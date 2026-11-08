@@ -20,6 +20,9 @@ export const ErrorCode = {
   CONFIRMATION_REQUIRED: 'confirmation_required',
   RATE_LIMITED: 'rate_limited',
   APPROVAL_REQUIRED: 'approval_required',
+  POLICY_BLOCKED: 'policy_blocked',
+  UNSUPPORTED_OPERATION: 'unsupported_operation',
+  NO_BROWSER: 'no_browser',
 
   // Target validation
   INVALID_URL: 'invalid_url',
@@ -44,6 +47,7 @@ export const ErrorCode = {
   BAD_SIGNATURE: 'bad_signature',
   MESSAGE_TOO_LARGE: 'message_too_large',
   INVALID_MESSAGE: 'invalid_message',
+  BUSY: 'busy',
   ORIGIN_NOT_ALLOWED: 'origin_not_allowed',
 
   // Website-side

@@ -18,9 +18,9 @@ function tmpStore(): Store {
 }
 
 function seed(store: Store) {
-  store.enableDomain('example.com', { origin: 'https://example.com' });
+  store.enableDomain('https://example.com', 'example.com');
   const endpoint = store.recordObservation({
-    domain: 'example.com',
+    origin: 'https://example.com',
     method: 'GET',
     path: '/api/tasks',
     queryKeys: ['status'],
@@ -28,7 +28,7 @@ function seed(store: Store) {
     contentType: 'application/json',
     source: 'webRequest',
   });
-  const { created } = store.generateDrafts('example.com');
+  const { created } = store.generateDrafts('https://example.com');
   return { endpoint, tool: created[0] };
 }
 

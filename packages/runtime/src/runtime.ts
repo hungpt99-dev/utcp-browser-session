@@ -64,6 +64,7 @@ export async function createRuntime(options: CreateRuntimeOptions = {}): Promise
     server,
     async close() {
       await hub.close();
+      store.close();
       await server.stop();
     },
   };
