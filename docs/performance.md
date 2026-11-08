@@ -27,18 +27,22 @@ which dominates everything below — the numbers here isolate the stack's own co
 Both used the same approved tool, same endpoint (`GET /api/tasks?status=open&limit=10`),
 same browser, 200 samples after 20 warm-up calls, sequential (no concurrency).
 
-## Results — after the audit (this revision)
+## Results — current revision (after both review passes)
 
 | Path | p50 | p95 | p99 | mean |
 | --- | --- | --- | --- | --- |
-| Direct browser fetch | 11.00 ms | 22.00 ms | 34.50 ms | 13.00 ms |
-| Via UTCP provider | 26.00 ms | 61.71 ms | 83.68 ms | 30.63 ms |
-| **Overhead** | **+15.00 ms** (2.36×) | +39.71 ms | +49.18 ms | +17.63 ms |
+| Direct browser fetch | 8.80 ms | 15.90 ms | 23.80 ms | 9.87 ms |
+| Via UTCP provider | 24.32 ms | 43.40 ms | 61.01 ms | 26.66 ms |
+| **Overhead** | **+15.52 ms** (2.76×) | +27.50 ms | +37.21 ms | +16.79 ms |
 
-- **Throughput:** 32.6 calls/s sequential, 0 % error rate over the 200-sample run.
-- **Schema validation + request construction:** 7.9 µs per call (10 000
+- **Throughput:** 37.5 calls/s sequential, 0 % error rate over the 200-sample run.
+- **Schema validation + request construction:** 7.3 µs per call (10 000
   iterations, `validateArguments` + `buildRequest`).
-- **Runtime RSS:** 107.7 MB after the run.
+- **Runtime RSS:** 107.1 MB after the run.
+
+This run includes the credential split (an extra constant-time comparison per
+request), streamed body reads and the frame-size accounting, so it measures the
+shipped code rather than the code the audit started from.
 
 ## Results — before the audit (commit `4f48201`)
 
@@ -52,11 +56,12 @@ Throughput was 31 calls/s, RSS 116.4 MB, validation 6.8 µs.
 
 ## Reading the two runs
 
-The direct path was 2 ms slower in the new run and the UTCP path 2.9 ms faster;
-on a shared VPS that is inside the noise floor (the direct p99 moved 24.7 → 34.5
-ms with no code change on that path). What is *not* noise is the overhead:
-**+19.9 → +15.0 ms p50 (−25 %)**, which matches removing two synchronous
-full-document writes from every call.
+The direct path moved 9.0 → 8.8 ms and the UTCP path 28.9 → 24.3 ms between the
+first and the current run, on a shared VPS where the direct p99 has ranged from
+23.8 to 34.5 ms across runs with no code change on that path. Treat single-run
+deltas as noise. Across the three runs recorded here the overhead sits at
+**+15.5 to +19.9 ms p50**, and the direction is consistent with removing two
+synchronous full-document writes from every call.
 
 The persistence change is measured separately, where the effect is unambiguous:
 
@@ -64,7 +69,7 @@ The persistence change is measured separately, where the effect is unambiguous:
 | --- | --- | --- |
 | Store mutations per call | 3 full rewrites of `state.json` | 2 appends + 1 coalesced write |
 | 300 calls — wall time | 1 916 ms | 76 ms |
-| 300 calls — per call | 6.39 ms | **0.25 ms** |
+| 300 calls — per call | 6.39 ms | **0.25–0.61 ms** (two runs) |
 | `state.json` after 300 calls | 229 KB | 2.5 KB |
 | Audit / execution data | in the document (rewritten each time) | `audit.ndjson` 108 KB, `executions.ndjson` 170 KB (appended) |
 

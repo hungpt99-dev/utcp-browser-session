@@ -89,8 +89,8 @@ Now executions and audit events go to append-only NDJSON logs (rotated at 8 MB),
 and the state document holds only configuration. Both high-frequency counters
 (`requestCount`, `lastExecutedAt`) coalesce into one write every 15 ms.
 
-Measured after: 300 executions take **49 ms** (0.16 ms each); `state.json` stays
-2.3 KB. Security-relevant mutations (approvals, revocations, domain changes,
+Measured after: 300 executions take **76–181 ms** (0.25–0.61 ms each across two
+runs); `state.json` stays 2.5 KB. Security-relevant mutations (approvals, revocations, domain changes,
 pairing) still write synchronously.
 
 Evidence: `docs/performance.md`, and the same benchmark can be re-run.

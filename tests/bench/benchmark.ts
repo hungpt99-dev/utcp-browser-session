@@ -89,11 +89,14 @@ const runtime: ChildProcess = spawn(process.execPath, ['packages/runtime/src/ind
   detached: false,
 });
 await waitForHealth(runtimeUrl);
+// Two credentials: the admin one drives setup (pairing, domains, approvals);
+// the agent one is what a UTCP client actually holds.
+const adminToken = fs.readFileSync(path.join(dataDir, 'runtime-token'), 'utf8').trim();
 const token = fs.readFileSync(path.join(dataDir, 'agent-token'), 'utf8').trim();
 const api = async (pathname: string, init: RequestInit = {}) => {
   const response = await fetch(`${runtimeUrl}${pathname}`, {
     ...init,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
+    headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
   });
   return { status: response.status, body: await response.json().catch(() => null) };
 };

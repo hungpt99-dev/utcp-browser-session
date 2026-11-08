@@ -249,8 +249,8 @@ Each one has a command and a real result.
 - **Scenario:** 300 tool calls' worth of store mutations.
 - **Command:** `node tests/bench/store-writes.ts --count 300`
 - **Expected:** no full-document rewrite on the hot path.
-- **Actual:** 76 ms total, **0.25 ms per call**, `state.json` 2.5 KB (was
-  1 916 ms / 6.39 ms / 229 KB).
+- **Actual:** 0.25–0.61 ms per call across two runs, `state.json` 2.5 KB (was
+  6.39 ms and 229 KB).
 - **Evidence:** `docs/performance.md`, `docs/audit-report.md` §4.
 
 ## Second review pass
