@@ -14,7 +14,7 @@
  * Everything is keyed by *origin*, not hostname: two applications on the same
  * host (typical on localhost) must not share a capture switch or a bucket.
  */
-import type { EndpointObservation, ShapeNode } from '@utcp-browser-session/shared';
+import { shapeDepth, type EndpointObservation, type ShapeNode } from '@utcp-browser-session/shared';
 
 const SKIP_TYPES = new Set([
   'main_frame',
@@ -33,6 +33,7 @@ const SKIP_TYPES = new Set([
 const MAX_PENDING = 300;
 const MAX_SEEN = 2000;
 const MAX_BUFFER = 200;
+const MAX_SHAPE_DEPTH = 6;
 
 interface Pending {
   method: string;
@@ -161,6 +162,18 @@ export class DiscoveryCollector {
     };
     if (typeof event.status === 'number' && event.status >= 100) observation.status = event.status;
     if (event.contentType) observation.contentType = String(event.contentType).split(';')[0].slice(0, 120);
+    // A hostile or broken page can send a pathologically deep shape; zod's
+    // parser would blow the stack on it (which used to take the runtime down).
+    if (event.requestShape && shapeDepth(event.requestShape) > MAX_SHAPE_DEPTH) {
+      this.drops.badUrl += 1;
+      this.drops.lastDrop = 'shape_too_deep';
+      return;
+    }
+    if (event.responseShape && shapeDepth(event.responseShape) > MAX_SHAPE_DEPTH) {
+      this.drops.badUrl += 1;
+      this.drops.lastDrop = 'shape_too_deep';
+      return;
+    }
     if (event.requestShape) observation.requestShape = event.requestShape;
     if (event.responseShape) observation.responseShape = event.responseShape;
     if (event.csrfHeader) observation.csrfHeaderSeen = true;
@@ -193,6 +206,16 @@ export class DiscoveryCollector {
     }
     this.buffer.push(observation);
     if (this.buffer.length > MAX_BUFFER) this.buffer.splice(0, this.buffer.length - MAX_BUFFER);
+  }
+
+  /** Look at the next batch without consuming it. */
+  peek(max = 40): EndpointObservation[] {
+    return this.buffer.slice(0, max);
+  }
+
+  /** Drop the first `count` buffered observations after a successful send. */
+  commit(count: number): void {
+    this.buffer.splice(0, Math.max(0, count));
   }
 
   drain(): EndpointObservation[] {

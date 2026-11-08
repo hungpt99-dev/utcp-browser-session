@@ -34,6 +34,20 @@ system, fixed, and is covered by a test that fails without the fix. Full detail:
   instead of the query string.
 - **Discovery memory**: the dedupe map is capped and pruned.
 
+### Security (second review pass)
+
+- **Two credentials.** The runtime now issues an execute-only `agent-token` for
+  UTCP clients next to the admin `runtime-token`. An agent can no longer approve
+  its own drafts, enable domains, rename tools or mint pairing codes.
+- The provider pins the runtime origin and refuses a `runtime_url` planted in a
+  manual, so the token cannot be redirected.
+- Revoking a paired browser disconnects it immediately.
+- Redirects must match the pinned origin (a port hop is refused); path
+  parameters are single segments (`..`, `/`, `%2e` refused); `csrf.bootstrapPath`
+  cannot be protocol-relative; `isLoopbackDomain` no longer accepts
+  `127.0.0.1.evil.com`.
+- Redaction moved to the persistence boundary (audit + execution path/errors).
+
 ### Added
 
 - Per-domain policy: permission ceiling, confirm-on-write, blocked path prefixes.

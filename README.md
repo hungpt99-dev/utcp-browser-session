@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6.svg)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/chrome-MV3-8b5cf6.svg)](#compatibility)
 [![UTCP 1.2.0](https://img.shields.io/badge/utcp-1.2.0-22c55e.svg)](https://github.com/universal-tool-calling-protocol/typescript-utcp)
-[![Tests](https://img.shields.io/badge/tests-165%20passing-22c55e.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-178%20passing-22c55e.svg)](#development)
 [![Node 24](https://img.shields.io/badge/node-%E2%89%A522.18-339933.svg)](#quick-start)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Security](#security) · [Compatibility](#compatibility) · [Docs](#documentation) · [Roadmap](#roadmap)
@@ -99,6 +99,7 @@ Everything below is implemented and covered by a test.
 | **Per-origin isolation** | The origin is the unit of everything: two apps on one host never share a record, a policy, a session state or a cookie. Re-validated on both sides of the websocket. |
 | **Domain policy** | Per-domain ceiling (`READ` / `WRITE` / `DESTRUCTIVE`), optional confirm-on-write, blocked path prefixes. Enforced at execution time, never by relabelling a tool. |
 | **API discovery** | `webRequest` inventory plus opt-in structural schema capture. Classifies REST / GraphQL / upload / download / stream, detects pagination, records CSRF hints, and scores confidence 0–1. Start/stop per origin, from the dashboard or the popup. |
+| **Separate agent credential** | The runtime issues an execute-only token for UTCP clients and keeps an admin token for you. An agent cannot approve a tool, enable a domain or change policy — the approval gate is a credential boundary, not a convention. |
 | **Human-reviewed tool generation** | Draft tools with input schema, parameter locations, permission level and discovery provenance. Approve, rename, revoke, delete. |
 | **Permission levels** | `READ` / `WRITE` / `DESTRUCTIVE` from evidence, not the verb alone: path semantics, GraphQL operation name, body shape; unknown operations stay `review required`. Destructive calls need `__confirm`. |
 | **Argument validation** | JSON Schema validation before anything leaves the runtime; unknown parameters are rejected, not ignored. |
@@ -136,13 +137,18 @@ npm run site             # http://127.0.0.1:8788
 npm run runtime
 ```
 
-It prints the runtime URL, the bearer token and a dashboard link:
+It prints two credentials and a dashboard link:
 
 ```text
   listening   http://127.0.0.1:8777
-  token       4f1c…  (also in ~/.utcp-browser-session/runtime-token)
-  Dashboard   http://127.0.0.1:8777/?token=4f1c…
+  admin token 4f1c…   ~/.utcp-browser-session/runtime-token   (you, the dashboard)
+  agent token 9a02…   ~/.utcp-browser-session/agent-token     (what a UTCP client uses)
+  Dashboard   http://127.0.0.1:8777/#token=4f1c…
 ```
+
+The admin token approves tools and changes policy. The agent token can only run
+approved tools, so an AI client cannot approve its own drafts. Give the agent the
+*agent* token and nothing else.
 
 **3. Load the extension**: `chrome://extensions` → Developer mode → **Load
 unpacked** → select `extension/dist`.
@@ -187,7 +193,7 @@ console.log(result.status, result.body.task.id);   // 201 101
 Or from a shell:
 
 ```bash
-UTCP_BROWSER_SESSION_TOKEN=$(cat ~/.utcp-browser-session/runtime-token) \
+UTCP_BROWSER_SESSION_TOKEN=$(cat ~/.utcp-browser-session/agent-token) \
   npm run manual:cli | head -40
 ```
 

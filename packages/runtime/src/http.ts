@@ -59,7 +59,22 @@ export interface RuntimeServerOptions {
   hub: ExtensionHub;
   executor: Executor;
   logger: Logger;
+  /** Admin credential. */
   token: string;
+  /** Execute-only credential handed to UTCP clients. */
+  agentToken: string;
+}
+
+/** Routes an execute-only credential may call. Everything else needs admin. */
+const AGENT_ROUTES: Array<{ method: string; test: RegExp }> = [
+  { method: 'POST', test: /^\/api\/v1\/execute$/ },
+  { method: 'GET', test: /^\/api\/v1\/status$/ },
+  { method: 'GET', test: /^\/api\/v1\/manual$/ },
+  { method: 'GET', test: /^\/api\/v1\/manual\/validate$/ },
+];
+
+function isAgentRoute(method: string, pathname: string): boolean {
+  return AGENT_ROUTES.some((route) => route.method === method && route.test.test(pathname));
 }
 
 export interface RuntimeServer {
@@ -120,7 +135,7 @@ function extensionOrigin(req: http.IncomingMessage): string | null {
 }
 
 export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServer {
-  const { config, store, hub, executor, logger, token } = options;
+  const { config, store, hub, executor, logger, token, agentToken } = options;
 
   const server = http.createServer((req, res) => {
     void handle(req, res).catch((error) => {
@@ -142,11 +157,13 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
     }
   });
 
-  function authorized(req: http.IncomingMessage): boolean {
+  /** Which credential the request presented. */
+  function scopesOf(req: http.IncomingMessage): { admin: boolean; agent: boolean } {
     const header = req.headers.authorization ?? '';
     const match = /^Bearer\s+(.+)$/i.exec(header);
-    if (!match) return false;
-    return safeEqual(match[1].trim(), token);
+    if (!match) return { admin: false, agent: false };
+    const presented = match[1].trim();
+    return { admin: safeEqual(presented, token), agent: safeEqual(presented, agentToken) };
   }
 
   /** Accept either a full origin (preferred) or a bare hostname. */
@@ -229,10 +246,22 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
       return;
     }
 
-    // --- everything else needs the runtime token ---------------------------
-    if (pathname.startsWith('/api/') && !authorized(req)) {
-      json(res, 401, { error: ErrorCode.AUTH_REQUIRED, message: 'A runtime bearer token is required.' });
-      return;
+    // --- everything else needs a credential --------------------------------
+    if (pathname.startsWith('/api/')) {
+      const scopes = scopesOf(req);
+      if (!scopes.admin && !scopes.agent) {
+        json(res, 401, { error: ErrorCode.AUTH_REQUIRED, message: 'A runtime bearer token is required.' });
+        return;
+      }
+      // The agent credential can run tools and read the manual, nothing else:
+      // no approvals, no domain changes, no policy, no pairing codes.
+      if (!scopes.admin && !isAgentRoute(method, pathname)) {
+        json(res, 403, {
+          error: ErrorCode.POLICY_BLOCKED,
+          message: 'This credential is limited to executing approved tools; an admin credential is required.',
+        });
+        return;
+      }
     }
 
     if (pathname === '/api/v1/status') {
@@ -603,6 +632,14 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
     if (pathname === '/api/v1/manual' && method === 'GET') {
       const manualName = url.searchParams.get('manual') ?? store.settings.manualName;
       const manual = buildManual(store, { manualName, runtimeUrl: config.publicUrl });
+      // Validate before serving: a manual that fails its own policy (namespacing,
+      // call-template integrity, credential material) must not reach a client.
+      const report = validateManualDocument(manual, store.settings.manualName);
+      if (!report.ok) {
+        logger.error('manual.invalid', { errors: report.errors.slice(0, 5) });
+        json(res, 500, { error: ErrorCode.INTERNAL_ERROR, message: 'The generated manual failed validation.', details: report.errors });
+        return;
+      }
       json(res, 200, manual);
       return;
     }
@@ -631,8 +668,11 @@ export function createRuntimeServer(options: RuntimeServerOptions): RuntimeServe
 
     const clientMatch = /^\/api\/v1\/clients\/([^/]+)$/.exec(pathname);
     if (clientMatch && method === 'DELETE') {
-      const revoked = store.revokeClient(decodeURIComponent(clientMatch[1]));
+      const clientId = decodeURIComponent(clientMatch[1]);
+      const revoked = store.revokeClient(clientId);
       if (!revoked) throw new HttpError(404, ErrorCode.PAIRING_INVALID, 'Unknown client.');
+      // Revocation must take effect now, not at the next reconnect.
+      hub.disconnectClient(clientId);
       store.audit({
         kind: 'extension.revoked',
         severity: 'warn',
@@ -693,8 +733,9 @@ code{background:#141b2d;padding:2px 6px;border-radius:4px}</style></head>
   }
 
   const relative = pathname === '/' ? '/index.html' : pathname;
+  const base = path.resolve(root);
   const resolved = path.resolve(root, `.${relative}`);
-  if (!resolved.startsWith(path.resolve(root))) {
+  if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
     res.writeHead(403);
     res.end('forbidden');
     return;

@@ -121,6 +121,11 @@
     requestBytes?: number;
   }
 
+  /** Requests created from a `Request` object expose no readable body; skip. */
+  function readRequestBody(_input: Request): undefined {
+    return undefined;
+  }
+
   function analyzeRequest(body: unknown, headers: unknown): RequestAnalysis {
     const info: RequestAnalysis = {};
     if (typeof body === 'string' && body.length > 0) info.requestBytes = body.length;
@@ -209,7 +214,11 @@
         return originalFetch.call(window, input as RequestInfo, init);
       }
 
-      const analyzed = analyzeRequest(request.body, request.headers);
+      // A `Request` input carries its own body/headers; the init only wins when
+      // it supplies them.
+      const requestBody = request.body ?? (input instanceof Request ? readRequestBody(input) : undefined);
+      const requestHeaders = request.headers ?? (input instanceof Request ? input.headers : undefined);
+      const analyzed = analyzeRequest(requestBody, requestHeaders);
 
       let promise: Promise<Response>;
       try {

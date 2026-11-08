@@ -227,7 +227,9 @@ export class Executor {
       );
       const origin = domainConfig.origin;
       let url = `${origin}${built.path}${built.query ? `?${built.query}` : ''}`;
-      record.path = `${built.path}${built.query ? `?${built.query}` : ''}`;
+      // The query string can carry a token (`access_token=...`), so the stored
+      // path is redacted before it reaches the execution record or the audit log.
+      record.path = redactString(`${built.path}${built.query ? `?${built.query}` : ''}`);
       record.permissionDecision = 'allowed';
 
       const checkedUrl = checkTargetUrl(url, tool.domain, { expectedOrigin: origin });
@@ -254,7 +256,7 @@ export class Executor {
         if (!location) {
           throw new ToolError(ErrorCode.INVALID_RESPONSE, 'The website returned a redirect without a Location header.');
         }
-        const verdict = checkRedirect(location, url, tool.domain);
+        const verdict = checkRedirect(location, url, tool.domain, { expectedOrigin: origin });
         if (!verdict.ok || !verdict.url) {
           this.store.audit({
             kind: 'request.redirect_blocked',
@@ -395,7 +397,7 @@ export class Executor {
       const shape = toErrorShape(error);
       record.errorCode = shape.code;
       record.errorCategory = errorCategory(shape.code);
-      record.errorMessage = shape.message;
+      record.errorMessage = redactString(shape.message);
       record.finishedAt = new Date().toISOString();
       if (record.latencyMs === null) record.latencyMs = Date.now() - startedMs;
       if (record.outcome !== 'timeout') {

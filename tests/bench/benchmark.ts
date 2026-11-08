@@ -89,7 +89,7 @@ const runtime: ChildProcess = spawn(process.execPath, ['packages/runtime/src/ind
   detached: false,
 });
 await waitForHealth(runtimeUrl);
-const token = fs.readFileSync(path.join(dataDir, 'runtime-token'), 'utf8').trim();
+const token = fs.readFileSync(path.join(dataDir, 'agent-token'), 'utf8').trim();
 const api = async (pathname: string, init: RequestInit = {}) => {
   const response = await fetch(`${runtimeUrl}${pathname}`, {
     ...init,

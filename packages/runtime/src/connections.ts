@@ -25,6 +25,7 @@ import {
   ExtensionMessageSchema,
   LIMITS,
   ToolError,
+  shapeDepth,
   type EndpointObservation,
   type ExecuteMessage,
   type ExtensionMessage,
@@ -35,6 +36,8 @@ import type { Logger } from './logger.ts';
 
 const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/([a-p]{32})$/;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+/** Two missed heartbeats and the socket is considered dead. */
+const PING_STALE_MS = 75_000;
 const METRIC_WINDOW = 500;
 
 interface Pending {
@@ -216,7 +219,18 @@ export class ExtensionHub extends EventEmitter {
         }
 
         this.dispatch(message);
-      })();
+      })().catch((error: unknown) => {
+        // A hostile frame (e.g. a shape nested 2000 deep) can make zod throw a
+        // RangeError. That must close the socket, never take the runtime down.
+        this.logger.warn('extension.message.failed', {
+          message: error instanceof Error ? error.message : 'unknown',
+        });
+        try {
+          ws.close(4400, 'bad message');
+        } catch {
+          /* already closed */
+        }
+      });
     });
 
     ws.on('close', () => {
@@ -273,6 +287,15 @@ export class ExtensionHub extends EventEmitter {
   }
 
   private adopt(ws: WebSocket, clientId: string, label: string, extensionId: string): void {
+    // Calls in flight on the socket being replaced will never be answered by it;
+    // reject them now instead of letting them wait out their timeouts.
+    if (this.socket && this.socket !== ws) {
+      for (const [id, pending] of this.pending) {
+        clearTimeout(pending.timer);
+        pending.reject(new ToolError(ErrorCode.EXTENSION_DISCONNECTED, 'The browser connection was replaced by a newer one.'));
+        this.pending.delete(id);
+      }
+    }
     if (this.socket && this.socket !== ws) {
       try {
         this.socket.close(4409, 'replaced by a newer connection');
@@ -438,6 +461,11 @@ export class ExtensionHub extends EventEmitter {
     this.counters.discoveryFrames += 1;
     const byOrigin = new Map<string, EndpointObservation[]>();
     for (const event of events) {
+      // Depth is bounded before anything is stored or stringified further.
+      if (shapeDepth(event.requestShape) > LIMITS.maxSchemaDepth || shapeDepth(event.responseShape) > LIMITS.maxSchemaDepth) {
+        this.counters.observationsDropped += 1;
+        continue;
+      }
       const capturing = this.connection?.capturing.has(event.origin) ?? false;
       if (!capturing || !this.store.isDomainEnabled(event.origin)) {
         this.counters.observationsDropped += 1;
@@ -551,12 +579,19 @@ export class ExtensionHub extends EventEmitter {
     return false;
   }
 
-  private syncFrame(): { type: 'sync'; enabledOrigins: string[]; deepCaptureOrigins: string[]; enumCaptureOrigins: string[] } {
+  private syncFrame(): {
+    type: 'sync';
+    enabledOrigins: string[];
+    deepCaptureOrigins: string[];
+    enumCaptureOrigins: string[];
+    capturing: string[];
+  } {
     return {
       type: 'sync',
       enabledOrigins: this.store.enabledOrigins(),
       deepCaptureOrigins: this.store.deepCaptureOrigins(),
       enumCaptureOrigins: this.store.enumCaptureOrigins(),
+      capturing: [...(this.connection?.capturing ?? [])],
     };
   }
 
@@ -577,8 +612,40 @@ export class ExtensionHub extends EventEmitter {
     this.connection?.capturing.delete(origin);
   }
 
+  /** Close the live socket for a client that was just revoked. */
+  disconnectClient(clientId: string, reason = 'client_revoked'): boolean {
+    if (this.connection?.clientId !== clientId) return false;
+    const socket = this.socket;
+    this.dropConnection(reason);
+    try {
+      socket?.close(4003, reason);
+    } catch {
+      /* already gone */
+    }
+    this.store.audit({
+      kind: 'extension.revoked_live',
+      severity: 'warn',
+      actor: 'runtime',
+      message: `Disconnected ${clientId} because its pairing was revoked.`,
+    });
+    return true;
+  }
+
   private tick(): void {
     if (!this.socket) return;
+    // A half-open socket (blackholed TCP) never fires close/error; without this
+    // the dashboard would show a connected browser that cannot answer.
+    const lastSeen = this.connection?.lastMessageAt ?? 0;
+    if (lastSeen > 0 && Date.now() - lastSeen > PING_STALE_MS) {
+      this.logger.warn('extension.socket.stale', { silentMs: Date.now() - lastSeen });
+      try {
+        this.socket.terminate();
+      } catch {
+        /* already gone */
+      }
+      this.dropConnection('socket_stale');
+      return;
+    }
     if (this.socket.readyState === WebSocket.OPEN) {
       try {
         this.socket.send(JSON.stringify({ type: 'ping', ts: Date.now() }));

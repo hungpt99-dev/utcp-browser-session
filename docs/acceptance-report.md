@@ -21,13 +21,13 @@ and its output.
 | --- | --- | --- |
 | Typecheck | `npm run typecheck` | **PASS** — `tsc -p tsconfig.json`, 0 errors, strict mode |
 | Lint | `npm run lint` | **PASS** — `lint: clean` |
-| Unit + integration + security | `npm test` | **PASS** — 151 tests, 0 failures, ~9 s |
+| Unit + integration + security | `npm test` | **PASS** — 164 tests, 0 failures, ~10 s |
 | Production build | `npm run build` | **PASS** — `dashboard/dist/index.html`, `extension/dist/{background.js,manifest.json,popup/index.html}` |
 | End-to-end | `xvfb-run -a npm run test:e2e` | **PASS** — 14 tests, 0 failures, ~19 s (includes multi-site isolation) |
 | Benchmark | `xvfb-run -a node tests/bench/benchmark.ts --requests 200` | **PASS** — 0 % error rate, `docs/performance.json` written |
 | Store writes | `node tests/bench/store-writes.ts --count 300` | **PASS** — 0.25 ms per call, `state.json` 2.5 KB |
 
-Total automated tests: **165** (84 unit + 53 integration + 14 security + 14 E2E).
+Total automated tests: **178** (85 unit + 53 integration + 26 security + 14 E2E).
 
 ## Criteria
 
@@ -252,3 +252,39 @@ Each one has a command and a real result.
 - **Actual:** 76 ms total, **0.25 ms per call**, `state.json` 2.5 KB (was
   1 916 ms / 6.39 ms / 229 KB).
 - **Evidence:** `docs/performance.md`, `docs/audit-report.md` §4.
+
+## Second review pass
+
+### AC-20 — The agent credential cannot approve anything · PASS
+
+- **Scenario:** using only the execute token the manual hands to a client, try to
+  approve a draft, enable a domain, mint a pairing code and read the audit log;
+  then execute an approved tool with the same token.
+- **Command:** `node --test tests/security/token-scope.test.ts`
+- **Expected:** every admin route answers 403, execution and manual reads work.
+- **Actual:** 403 on approve/enable/pair/audit/clients and the draft stays a
+  draft; `GET /api/v1/manual` and `POST /api/v1/execute` return 200 with the same
+  token; the admin token still works on all of them.
+- **Evidence:** `tests/security/token-scope.test.ts`.
+
+### AC-21 — The provider cannot be redirected to another runtime · PASS
+
+- **Scenario:** register a manual that carries `runtime_url` pointing at an
+  attacker-controlled listener, with a literal token in the template.
+- **Command:** `node --test tests/security/token-scope.test.ts` (suite
+  "provider runtime pinning")
+- **Expected:** registration fails and the listener receives zero requests.
+- **Actual:** `success: false` with "pinned to …" and `hits === 0`; the token
+  never leaves the pinned origin.
+- **Evidence:** same file; the listener counts its own requests.
+
+### AC-22 — Path, redirect and CSRF bypasses are closed · PASS
+
+- **Scenario:** `id = ..`, `.`, `../admin`, `%2e%2e`, `a/b`; a 302 to the same
+  host on another port; a `csrf.bootstrapPath` of `//host:port`.
+- **Command:** `node --test tests/security/token-scope.test.ts tests/security/ssrf.test.ts`
+- **Expected:** the first two are refused before dispatch, the redirect is
+  `redirect_blocked`, the CSRF path is rejected with 400.
+- **Actual:** exactly that; the fake extension records zero frames for every
+  refused call.
+- **Evidence:** `tests/security/token-scope.test.ts`, `tests/security/ssrf.test.ts`.

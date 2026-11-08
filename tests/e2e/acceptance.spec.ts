@@ -152,7 +152,7 @@ test('AC-06: a write tool mutates the site exactly once, but only when approved'
   await world.api(`/api/v1/tools/${createTool.id}/revoke`, { method: 'POST' });
   const requestsBefore = world.site.getRequestLog().length;
 
-  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.token });
+  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.agentToken });
   // The revoked tool is no longer in the manual, so the client cannot even see it.
   const visible = (await client.getTools()).map((tool) => tool.name);
   expect(visible).not.toContain('browser.create_task');
@@ -183,7 +183,7 @@ test('AC-06: a write tool mutates the site exactly once, but only when approved'
 });
 
 test('AC-06: destructive tools require an explicit confirmation', async ({ world }) => {
-  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.token });
+  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.agentToken });
   const before = world.site.getTasks().length;
   const target = world.site.getTasks().find((task) => task.id === 2)!;
   expect(target).toBeTruthy();
@@ -207,7 +207,7 @@ test('AC-07: an expired session yields a reconnect instruction and no fallback',
   });
   await page.close();
 
-  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.token });
+  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.agentToken });
   const requestsBefore = world.site.getRequestLog().length;
   await expect(client.callTool('browser.list_tasks', {})).rejects.toThrow(/not authenticated|Sign in again/i);
 
@@ -269,6 +269,7 @@ test('AC-09: no browser credential appears in responses, logs or state', async (
   const state = await (await import('node:fs')).promises.readFile(`${world.runtime.config.dataDir}/state.json`, 'utf8');
   expect(state).not.toContain('sid=');
   expect(state).not.toContain(world.runtime.token);
+  expect(state).not.toContain(world.runtime.agentToken);
 
   // The extension itself must not be able to read the cookie either.
   const cookieVisible = await world.serviceWorker.evaluate(async () => {
@@ -301,7 +302,7 @@ test('AC-10: the runtime survives a timeout and returns a structured error', asy
     .created.find((tool) => tool.pathTemplate === '/api/slow')!;
   world.runtime.store.approveTool(draft.id, 'test');
 
-  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.token });
+  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.agentToken });
   await expect(client.callTool(draft.fqName, { ms: '5000' })).rejects.toThrow(/did not finish|timed out/i);
 
   const status = await world.api('/api/v1/status');
@@ -315,7 +316,7 @@ test('AC-10: the runtime stays up when the browser goes away and recovers on rec
   await popup.waitForTimeout(800);
   expect(world.runtime.hub.status().connected).toBe(false);
 
-  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.token });
+  const { client } = await createBrowserSessionClient({ runtimeUrl: world.runtime.url, token: world.runtime.agentToken });
   await expect(client.callTool('browser.list_tasks', {})).rejects.toThrow(/browser|disconnected/i);
 
   const health = await world.api('/api/v1/status');

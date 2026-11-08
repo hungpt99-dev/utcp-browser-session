@@ -169,6 +169,38 @@ still usable afterwards), `tests/e2e/multidomain.spec.ts` (per-origin state).
 - Coalesced writes check that the data directory still exists.
 - `requestCount` increments on a successful call.
 
+## Second review pass
+
+An independent review of the same tree found further issues. They are listed
+here because they were real, and fixed the same way: reproduce, fix, test.
+
+| # | Severity | Finding | Fix |
+|---|----------|---------|-----|
+| 16 | CRITICAL | One bearer token was both the agent's call credential and the admin credential, so a UTCP client could approve its own drafts, enable domains, rename tools or mint pairing codes. The approval model constrained nothing. | Two credentials: `runtime-token` (admin) and `agent-token` (execute-only). The agent credential may only call `/execute`, `/status`, `/manual` and `/manual/validate`; everything else returns 403. The manual and the provider use the agent credential. |
+| 17 | HIGH | The provider attached its token to whatever `runtime_url` a manual declared — a prompt-injected manual could point it at an attacker. | The destination is pinned at `createBrowserSessionClient`; a template URL on another origin is refused before the header is attached, and with no pin only loopback is allowed. |
+| 18 | HIGH | Revoking a paired browser did not disconnect it; it kept executing until it happened to drop. | Revocation closes the live socket (4003) and rejects its pending calls. |
+| 19 | HIGH | Redirects were checked against the hostname only, so a redirect to another port on the same host passed. | `checkRedirect` now carries the pinned origin; a port hop is `redirect_blocked`. |
+| 20 | HIGH | Path parameters were `encodeURIComponent`-ed, which leaves `..`; URL normalisation then turned `/api/tasks/..` into `/api/`, escaping the approved endpoint. | A path parameter must be one segment: `.`, `..`, `/`, `\`, `%2e`, `%2f`, `%5c` are refused with `invalid_arguments` before the URL is built. |
+| 21 | MEDIUM | `csrf.bootstrapPath` accepted `//host:port`, a protocol-relative URL that leaves the pinned origin. | Schema requires `^/[^/]`; the extension also passes the pinned origin to `checkTargetUrl`. |
+| 22 | MEDIUM | `isLoopbackDomain` matched any hostname starting with `127.`, so `127.0.0.1.evil.com` was treated as loopback and allowed over plain HTTP. | Only a literal IPv4 in 127/8, `localhost` and `[::1]` count. |
+| 23 | MEDIUM | Secrets in query parameters and upstream error messages were persisted verbatim in executions and the audit log, contrary to the documented redaction guarantee. | Redaction moved to the persistence boundary (`Store.audit`, execution `path`/`errorMessage`), so every current and future caller is covered. |
+| 24 | HIGH | A 1 MiB response body exceeded the 512 KiB frame limit, so a large response killed the websocket instead of being truncated. | The body cap is derived from the frame budget, `send()` measures the encoded frame and degrades a result to `truncated`, and responses are streamed with a hard cap instead of `arrayBuffer()`. |
+| 25 | HIGH | The abort timer was cleared before the body was read, so a slow body could hang past the timeout and grow the worker without bound. | The timer now covers the read, and the reader is cancelled at the cap. |
+| 26 | HIGH | After any reconnect the runtime started with an empty capture set while the extension kept recording, so every observation was dropped silently. | `sync` carries the runtime's `capturing` set and the extension treats it as authoritative. |
+| 27 | HIGH | A deeply nested shape made zod throw `RangeError` inside an un-caught async handler, terminating the runtime process. | Depth is bounded at ingest, and the message handler catches and closes the socket instead of crashing. |
+| 28 | MEDIUM | Discovery batches were drained before the send, so a failing socket silently lost them. | `peek`/`commit`: the buffer is only consumed after a successful write. |
+| 29 | MEDIUM | Frames could be sent before the handshake completed, and a dead socket's `close` reset the state of the live one. | A `ready` gate buffers outbound frames until `sync`, `fail()` ignores displaced sockets, and re-pairing closes the old socket first. |
+| 30 | MEDIUM | Capture state was computed from a stale cache outside the write queue, so `sync` and `discovery_start` could erase each other. | `setState` accepts a function evaluated inside the queue. |
+| 31 | MEDIUM | MV3 suspended the worker and its listeners with it, losing buffered observations. | Loopback listeners are registered synchronously at module scope (so Chrome wakes the worker), and `onSuspend` flushes. |
+| 32 | MEDIUM | Tap messages from page scripts were unvalidated and unthrottled. | Payload size, shape depth and a per-second budget are enforced in the worker. |
+| 33 | LOW | The CSRF bootstrap fetch had no timeout or size cap; a takeover left the displaced socket's calls waiting out their timeouts; `safeEqual` leaked length; the manual was served unvalidated; the static-root check used a bare prefix. | Bounded fetch, pending calls rejected on adopt, digest comparison, validate-before-serve, separator-aware containment. |
+
+Evidence: `tests/security/token-scope.test.ts` (scopes, provider pinning, path
+traversal, redirect port hop, protocol-relative CSRF path, redaction, revocation
+disconnect), `tests/unit/domain.test.ts` (loopback lookalikes),
+`tests/integration/concurrency.test.ts` (cancellation),
+`tests/integration/isolation.test.ts` (policy ceiling).
+
 ## Not found (checked, negative results)
 
 - No path from the HTTP API to an arbitrary URL: every execution resolves a

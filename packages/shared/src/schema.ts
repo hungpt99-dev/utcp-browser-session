@@ -6,6 +6,7 @@
  * module turns those shapes into JSON Schema, merges repeated observations, and
  * validates arguments before anything is sent to a website.
  */
+import { ErrorCode, ToolError } from './errors.ts';
 import { LIMITS } from './limits.ts';
 
 export type JsonSchema = {
@@ -644,7 +645,21 @@ export function buildRequest(target: RequestTarget, args: Record<string, unknown
   for (const [key, value] of Object.entries(args)) {
     const location = target.paramLocations[key] ?? 'body';
     if (location === 'path') {
-      path = path.replace(new RegExp(`\\{${key}\\}`, 'g'), encodeURIComponent(String(value)));
+      // `encodeURIComponent` leaves `.` alone, and URL parsing then collapses
+      // `/api/tasks/..` to `/api/`, silently escaping the approved endpoint.
+      // Refuse anything that is not a plain single path segment.
+      const raw = String(value);
+      const decoded = (() => {
+        try {
+          return decodeURIComponent(raw);
+        } catch {
+          return raw;
+        }
+      })();
+      if (raw === '.' || raw === '..' || /[\\/]/.test(decoded) || decoded.includes('\0') || /%2e|%2f|%5c/i.test(raw)) {
+        throw new ToolError(ErrorCode.INVALID_ARGUMENTS, `Path parameter "${key}" must be a single path segment.`);
+      }
+      path = path.replace(new RegExp(`\\{${key}\\}`, 'g'), encodeURIComponent(raw));
     } else if (location === 'query') {
       if (value === undefined || value === null) continue;
       if (Array.isArray(value)) {

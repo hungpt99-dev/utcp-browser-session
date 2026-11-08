@@ -28,7 +28,8 @@ Commands:
 Environment:
   UBS_PORT                  Runtime port (default 8777)
   UBS_DATA_DIR              State directory (default ~/.utcp-browser-session)
-  UBS_TOKEN                 Override the runtime bearer token
+  UBS_TOKEN                 Override the admin bearer token
+  UBS_AGENT_TOKEN           Override the execute-only token given to UTCP clients
   UBS_DASHBOARD_DIR         Directory with the built dashboard
   UTCP_BROWSER_SESSION_TOKEN  Token used by the UTCP provider and by "call"
 `);
@@ -67,9 +68,10 @@ async function main(): Promise<void> {
         '  UTCP Browser Session runtime',
         `  listening   ${runtime.url}`,
         `  state       ${runtime.config.dataDir}`,
-        `  token       ${runtime.token}`,
+        `  admin token ${runtime.token}`,
+        `  agent token ${runtime.agentToken}   (this is what a UTCP client uses)`,
         '',
-        `  Dashboard   ${runtime.url}/?token=${runtime.token}`,
+        `  Dashboard   ${runtime.url}/#token=${runtime.token}`,
         '',
         '  Next: mint a pairing code with `utcp-browser-session pair`,',
         '  load the extension, and paste the code into its popup.',
@@ -87,7 +89,9 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig({});
-  const token = process.env.UTCP_BROWSER_SESSION_TOKEN ?? ensureToken(config.dataDir);
+  // CLI commands are administrative: they use the admin token, never the
+  // execute-only token an agent holds.
+  const token = process.env.UBS_TOKEN ?? ensureToken(config.dataDir);
   const base = config.publicUrl;
 
   if (command === 'pair') {

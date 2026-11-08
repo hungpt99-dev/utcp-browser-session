@@ -32,7 +32,7 @@ describe('cross-domain and SSRF protection', () => {
     await harness.close();
   });
 
-  it('percent-encodes argument values so they cannot escape the path segment', async () => {
+  it('refuses a path parameter containing a slash or traversal', async () => {
     harness.runtime.store.recordObservation({
       origin: harness.site.origin,
       method: 'GET',
@@ -45,20 +45,32 @@ describe('cross-domain and SSRF protection', () => {
     harness.runtime.store.approveTool(tool.id, 'test');
 
     const before = extension.received.length;
-    const result = await harness.api('/api/v1/execute', {
+    // An absolute URL as a path segment used to be percent-encoded and sent.
+    // A path segment has no legitimate reason to contain a slash, and `..`
+    // would let URL normalisation escape the approved template.
+    for (const id of ['http://169.254.169.254/latest/meta-data', '../../admin', '..']) {
+      const result = await harness.api<{ ok: boolean; error: { code: string } }>('/api/v1/execute', {
+        method: 'POST',
+        body: JSON.stringify({ tool: tool.fqName, args: { id }, confirm: false }),
+      });
+      assert.equal(result.body.ok, false, id);
+      assert.equal(result.body.error.code, 'invalid_arguments');
+    }
+    assert.equal(extension.received.length, before, 'nothing was dispatched');
+  });
+
+  it('still encodes benign special characters inside a segment', async () => {
+    const tool = harness.runtime.store.listTools({ status: 'approved' })[0];
+    const before = extension.received.length;
+    const result = await harness.api<{ ok: boolean }>('/api/v1/execute', {
       method: 'POST',
-      body: JSON.stringify({
-        tool: tool.fqName,
-        args: { id: 'http://169.254.169.254/latest/meta-data' },
-        confirm: false,
-      }),
+      body: JSON.stringify({ tool: tool.fqName, args: { id: 'a b?c#d' } }),
     });
     assert.equal(result.body.ok, true);
-    const sent = extension.received[before];
-    const sentUrl = new URL(sent.url);
-    assert.equal(sentUrl.host, new URL(harness.site.origin).host);
-    assert.equal(sentUrl.pathname.includes('169.254.169.254'), true, 'the payload stays inside the path');
-    assert.equal(sentUrl.pathname.startsWith('/api/tasks/'), true);
+    const sent = new URL(extension.received[before].url);
+    assert.equal(sent.host, new URL(harness.site.origin).host);
+    assert.equal(sent.pathname.includes('a%20b%3Fc%23d'), true, 'the value stays one encoded segment');
+    assert.equal(sent.search, '', 'no query was injected from the value');
   });
 
   it('refuses a tool whose domain is a private address', async () => {

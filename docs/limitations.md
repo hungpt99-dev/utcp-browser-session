@@ -120,6 +120,15 @@ Known unsupported cases:
   runtime (different `UBS_DATA_DIR` and port).
 - **Per-tool rate limits only.** There is no per-origin quota; the global
   in-flight cap is the coarse protection.
+- **MV3 can still suspend the worker mid-burst.** Loopback listeners are
+  registered synchronously (so Chrome wakes the worker) and `onSuspend` flushes,
+  but an observation that arrives between the last flush and the teardown can be
+  lost. The next `sync` re-establishes capture state.
+- **`reviewRequired` is advisory.** It flags thin evidence in the dashboard; the
+  person clicking Approve is the review. It is not a second confirmation step.
+- **Audit `actor` is client-asserted.** A caller with the admin token can label
+  its request `dashboard` or `cli`; the value is informational, not proof of
+  origin. Correlation ids and the credential scope are the trustworthy parts.
 
 ## Things this project will not do
 

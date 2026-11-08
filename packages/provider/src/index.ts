@@ -121,6 +121,66 @@ function resolveUrl(base: string, pathname: string): string {
   return new URL(pathname, base.endsWith('/') ? base : `${base}/`).toString();
 }
 
+/**
+ * Where the runtime lives, as far as this process is concerned.
+ *
+ * A manual is data: an LLM can register one, and its `runtime_url` is attacker
+ * controlled in the prompt-injection case. The runtime bearer token must never
+ * follow that field, so the destination is pinned once (by
+ * `createBrowserSessionClient`) and every template URL is checked against it.
+ */
+let pinnedRuntimeOrigin: string | null = null;
+
+export function pinRuntimeOrigin(runtimeUrl: string): void {
+  pinnedRuntimeOrigin = new URL(runtimeUrl).origin;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host === '::1') return true;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!match) return false;
+  const octets = match.slice(1).map(Number);
+  return octets.every((octet) => octet >= 0 && octet <= 255) && octets[0] === 127;
+}
+
+/**
+ * Validate the URL a manual asks the provider to call.
+ *
+ *  - pinned: the origin must equal the one this client was created with;
+ *  - unpinned: only loopback is allowed.
+ * Anything else is refused *before* the token is attached to a request.
+ */
+export function resolveRuntimeUrl(rawUrl: string): URL {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new ToolError(ErrorCode.INVALID_URL, `The call template has an unparseable runtime_url: ${String(rawUrl).slice(0, 120)}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ToolError(ErrorCode.URL_SCHEME_NOT_ALLOWED, 'The runtime URL must be http or https.');
+  }
+  if (pinnedRuntimeOrigin) {
+    if (url.origin !== pinnedRuntimeOrigin) {
+      throw new ToolError(
+        ErrorCode.POLICY_BLOCKED,
+        `Refusing to send the runtime token to ${url.origin}: this client is pinned to ${pinnedRuntimeOrigin}.`,
+        { hint: 'Create the client with the runtime URL you actually use; a manual cannot redirect the credential.' },
+      );
+    }
+    return url;
+  }
+  if (!isLoopbackHost(url.hostname)) {
+    throw new ToolError(
+      ErrorCode.POLICY_BLOCKED,
+      `Refusing to send the runtime token to ${url.origin}: a browser-session runtime must be on loopback.`,
+      { hint: 'Pass runtimeUrl to createBrowserSessionClient to pin a different origin explicitly.' },
+    );
+  }
+  return url;
+}
+
 export class BrowserSessionCommunicationProtocol extends CommunicationProtocol {
   readonly call_template_type = CALL_TEMPLATE_TYPE;
   private readonly aborter = new AbortController();
@@ -208,7 +268,7 @@ export class BrowserSessionCommunicationProtocol extends CommunicationProtocol {
     if (!template.runtime_url) {
       throw new ToolError(ErrorCode.INVALID_REQUEST, 'The call template has no runtime_url.');
     }
-    const url = new URL(resolveUrl(template.runtime_url, '/api/v1/manual'));
+    const url = resolveRuntimeUrl(resolveUrl(template.runtime_url, '/api/v1/manual'));
     if (template.manual_name) url.searchParams.set('manual', template.manual_name);
 
     const response = await fetch(url, {
@@ -242,7 +302,7 @@ export class BrowserSessionCommunicationProtocol extends CommunicationProtocol {
     if (!template.runtime_url) {
       throw new ToolError(ErrorCode.INVALID_REQUEST, 'The call template has no runtime_url.');
     }
-    const url = resolveUrl(template.runtime_url, '/api/v1/execute');
+    const url = resolveRuntimeUrl(resolveUrl(template.runtime_url, '/api/v1/execute')).toString();
     const timeout = template.timeout_ms ?? 30_000;
     let response: Response;
     try {
@@ -322,6 +382,9 @@ export interface BrowserSessionClient {
 export async function createBrowserSessionClient(options: CreateClientOptions): Promise<BrowserSessionClient> {
   registerBrowserSessionProtocol();
   const runtimeUrl = options.runtimeUrl ?? DEFAULT_RUNTIME_URL;
+  // Pin before anything can register a manual: every later template URL must
+  // resolve to this origin or the call is refused.
+  pinRuntimeOrigin(runtimeUrl);
   const manualName = options.clientManualName ?? options.manualName ?? 'browser';
   // The SDK namespaces variables per manual (`<manual>_<VAR>`), so the token is
   // supplied under both names.

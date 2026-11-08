@@ -57,6 +57,22 @@ authorisation decisions, and CAPTCHA/bot-detection arms races.
 
 ## Controls
 
+### Two credentials, and why
+
+The runtime issues two different tokens, because the agent and the human must not
+share one:
+
+| Credential | File | Holder | Can do |
+| --- | --- | --- | --- |
+| admin | `runtime-token` | you, the dashboard, the CLI | everything: domains, approvals, policy, pairing, settings, audit |
+| execute | `agent-token` | the UTCP manual / provider | `POST /api/v1/execute`, `GET /api/v1/status`, `GET /api/v1/manual`, `GET /api/v1/manual/validate` |
+
+Everything else answers `403 policy_blocked` for the execute credential. This is
+what makes "a human approves before anything runs" true: the credential an agent
+holds cannot approve a tool, enable a domain, rename a tool or mint a pairing
+code. The provider additionally pins the runtime origin, so a manual cannot
+redirect that credential to another destination.
+
 ### Authentication between components
 
 - **Extension ↔ runtime.** The extension generates an ECDSA P-256 key pair once.
@@ -123,6 +139,13 @@ stays inside the path.
   refused with `policy_blocked`; it is *not* silently relabelled (a WRITE
   relabelled READ would still mutate the site while claiming to be safe).
 - `blockedPathPrefixes` keeps whole areas (`/admin`) out of draft generation.
+- **Path parameters are single segments.** `.`, `..`, any slash, backslash or
+  percent-encoded equivalent is refused as `invalid_arguments` — otherwise URL
+  normalisation would let `/api/tasks/{id}` be aimed at a sibling endpoint that
+  was never discovered.
+- **Revoking a browser disconnects it.** The live socket is closed with 4003 and
+  its pending calls are rejected; revocation is not deferred to the next
+  reconnect.
 - `DESTRUCTIVE` requires `__confirm: true` on the call. The flag is stripped
   before the request is built, so it can never reach a website.
 - **Nobody can change policy through the manual.** Tools only execute; policy
@@ -142,9 +165,14 @@ stays inside the path.
 | Concurrency | 8 in flight (1–32) | Runtime semaphore |
 | Queue | 32 waiting calls, then `busy` | Runtime bounded queue |
 | Cancellation | on client disconnect | HTTP `close` → `cancel` frame → extension `abort` |
+| Response frame | one frame | body capped below `maxMessageBytes`, streamed and cancelled at the cap |
+| CSRF bootstrap | 5 s, 64 KiB | extension `AbortController` + content-length check |
 
 ### Credential hygiene
 
+- **Redaction happens at the persistence boundary**, not at each call site:
+  audit messages and details, the stored request path (query strings) and error
+  messages are redacted before they reach disk.
 - The extension requests **no** `cookies` permission. There is no code path that
   reads `document.cookie`, `chrome.cookies`, or a request's `Cookie` header.
 - The runtime's result envelope includes only an allowlist of response headers:

@@ -215,6 +215,11 @@ export const SyncMessageSchema = z.object({
   enabledOrigins: z.array(z.string().max(300)).max(200),
   deepCaptureOrigins: z.array(z.string().max(300)).max(200),
   enumCaptureOrigins: z.array(z.string().max(300)).max(200),
+  /**
+   * Origins the runtime currently considers under capture. Sent so a reconnect
+   * cannot leave the extension recording into a runtime that dropped the state.
+   */
+  capturing: z.array(z.string().max(300)).max(200).default([]),
 });
 
 export const PingMessageSchema = z.object({ type: z.literal('ping'), ts: z.number().int().positive() });
@@ -283,7 +288,8 @@ export const DomainInputSchema = z.object({
   captureEnums: z.boolean().default(false),
   csrf: z
     .object({
-      bootstrapPath: z.string().min(1).max(512).startsWith('/'),
+      // `^/[^/]` forbids `//host:port`, which would leave the pinned origin.
+      bootstrapPath: z.string().min(1).max(512).regex(/^\/[^/]/),
       tokenField: z.string().min(1).max(64),
       header: z.string().min(1).max(64).regex(/^[A-Za-z0-9-]+$/),
     })

@@ -46,7 +46,13 @@ export function normalizeDomain(input: string): string {
 
 export function isLoopbackDomain(domain: string): boolean {
   const d = normalizeDomain(domain);
-  return LOOPBACK_HOSTS.has(d) || d.startsWith('127.');
+  if (LOOPBACK_HOSTS.has(d)) return true;
+  // Only a real IPv4 in 127/8 counts. A prefix test would treat
+  // `127.0.0.1.evil.com` as loopback and allow plain HTTP to it.
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(d);
+  if (!match) return false;
+  const octets = match.slice(1).map(Number);
+  return octets.every((octet) => octet >= 0 && octet <= 255) && octets[0] === 127;
 }
 
 export function isValidDomain(domain: string): boolean {
@@ -193,14 +199,21 @@ export function checkTargetUrl(
  * runtime *and* by the extension, so a redirect can never collapse into an
  * off-domain request.
  */
-export function checkRedirect(rawLocation: string, fromUrl: string, expectedDomain: string): UrlCheckResult {
+export function checkRedirect(
+  rawLocation: string,
+  fromUrl: string,
+  expectedDomain: string,
+  options: { expectedOrigin?: string } = {},
+): UrlCheckResult {
   let resolved: URL;
   try {
     resolved = new URL(rawLocation, fromUrl);
   } catch {
     return { ok: false, code: ErrorCode.REDIRECT_BLOCKED, reason: 'Redirect location could not be parsed.' };
   }
-  return checkTargetUrl(resolved.toString(), expectedDomain);
+  // A redirect is a new destination: it must satisfy the same origin pin as the
+  // original call, not merely the same hostname (a port hop is a different app).
+  return checkTargetUrl(resolved.toString(), expectedDomain, options);
 }
 
 /** True when two URLs share scheme + host + port. */

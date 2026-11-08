@@ -69,10 +69,16 @@ export async function getState(): Promise<ExtensionState> {
  */
 let writeQueue: Promise<unknown> = Promise.resolve();
 
-export function setState(patch: Partial<ExtensionState>): Promise<ExtensionState> {
+export type StatePatch = Partial<ExtensionState> | ((current: ExtensionState) => Partial<ExtensionState>);
+
+export function setState(patch: StatePatch): Promise<ExtensionState> {
   const next = writeQueue.then(async () => {
     const current = await getState();
-    const merged = { ...current, ...patch };
+    // A function patch is evaluated *inside* the queue, against the value that
+    // actually won the previous write. Callers that computed a set from a stale
+    // module-level cache used to erase each other.
+    const resolved = typeof patch === 'function' ? patch(current) : patch;
+    const merged = { ...current, ...resolved };
     await chrome.storage.local.set({ [KEY]: merged });
     return merged;
   });

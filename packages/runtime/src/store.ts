@@ -14,6 +14,8 @@ import {
   detectPagination,
   inferPathTemplate,
   isBlockedPath,
+  redactString,
+  redactValue,
   responseIsArray,
   sanitizeName,
   scoreConfidence,
@@ -766,10 +768,14 @@ export class Store {
   audit(input: AuditInput): AuditEvent {
     const at = new Date().toISOString();
     const id = generateId('evt');
+    // Redact at the persistence boundary, not at the call site: every audit
+    // event is covered, including ones added later by new code paths.
+    const message = redactString(input.message);
+    const detail = input.detail ? (redactValue(input.detail) as Record<string, unknown>) : undefined;
     const prevHash = this.state.auditHead;
-    const detail = input.detail ? JSON.stringify(input.detail) : '';
+    const detailText = detail ? JSON.stringify(detail) : '';
     const hash = createHash('sha256')
-      .update([prevHash, id, at, input.kind, input.severity, input.actor, input.origin ?? '', input.toolName ?? '', input.correlationId ?? '', input.message, detail].join('|'))
+      .update([prevHash, id, at, input.kind, input.severity, input.actor, input.origin ?? '', input.toolName ?? '', input.correlationId ?? '', message, detailText].join('|'))
       .digest('hex');
 
     const entry: AuditEvent = {
@@ -781,8 +787,8 @@ export class Store {
       origin: input.origin ?? null,
       toolName: input.toolName ?? null,
       correlationId: input.correlationId ?? null,
-      message: input.message,
-      detail: input.detail,
+      message,
+      detail,
       prevHash,
       hash,
     };

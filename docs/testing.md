@@ -22,12 +22,12 @@ npm run bench                # performance comparison, writes docs/performance.j
 
 | Suite | Files | Tests | What it proves |
 | --- | --- | --- | --- |
-| `tests/unit` | 8 | 84 | schema accumulation, classification, URL/domain policy, redaction, manual integrity, audit chain, workflow inference |
+| `tests/unit` | 8 | 85 | schema accumulation, classification, URL/domain policy, redaction, manual integrity, audit chain, workflow inference |
 | `tests/integration` | 7 | 53 | discovery ingest, execution policy, isolation between origins, policy ceilings, concurrency/queue/cancel, popup intents, pairing |
-| `tests/security` | 2 | 14 | SSRF, credential leakage |
+| `tests/security` | 3 | 26 | SSRF, credential leakage, credential scope + provider pinning + traversal/redirect |
 | `tests/e2e` | 2 | 14 | the real browser: install, pair, discover, approve, execute, isolate, expire, disconnect |
 
-`npm test` runs the first three (151 tests). `npm run test:e2e` runs Playwright.
+`npm test` runs the first three (164 tests). `npm run test:e2e` runs Playwright.
 
 ## Suites
 

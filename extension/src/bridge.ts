@@ -15,7 +15,10 @@
     const payload = data.payload;
     if (!payload || typeof payload !== 'object') return;
     try {
-      chrome.runtime.sendMessage({ type: 'ubs:tap', payload });
+      // A promise rejection (worker restarting, context invalidated) must be
+      // handled, otherwise it surfaces as an unhandled rejection in the page.
+      const result = chrome.runtime.sendMessage({ type: 'ubs:tap', payload }) as unknown as Promise<unknown> | undefined;
+      if (result && typeof result.catch === 'function') result.catch(() => undefined);
     } catch {
       // Service worker is restarting; the observation is simply lost.
     }

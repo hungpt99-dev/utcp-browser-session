@@ -14,6 +14,7 @@
  */
 import {
   ErrorCode,
+  ExecuteMessageSchema,
   LIMITS,
   checkTargetUrl,
   type ExecuteMessage,
@@ -23,7 +24,14 @@ import { DiscoveryCollector, type TapEvent } from './lib/discovery.ts';
 import { generateKeyPair, signChallenge } from './lib/crypto.ts';
 import { clearPairing, getState, isPaired, setState, type ExtensionState } from './lib/state.ts';
 
-const MAX_RESPONSE_BYTES = LIMITS.maxResponseBytes;
+/**
+ * A result travels in a single websocket frame, and the runtime closes the
+ * socket when a frame exceeds `maxMessageBytes`. Capping the body at the frame
+ * limit (minus room for headers and JSON escaping) keeps a large response from
+ * looking like a protocol violation.
+ */
+const MAX_RESPONSE_BYTES = Math.min(LIMITS.maxResponseBytes, LIMITS.maxMessageBytes - 32 * 1024);
+const MAX_CSRF_BYTES = 64 * 1024;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 const ALARM_NAME = 'ubs:reconnect';
@@ -41,6 +49,9 @@ let tapMessages = 0;
 let tapAccepted = 0;
 const syncLog: string[] = [];
 let lastExecute: { url: string; error?: string; status?: number } | null = null;
+/** Simple per-worker budget for page-originated tap messages. */
+let tapBudget = 0;
+let lastTapAt = 0;
 
 async function state(): Promise<ExtensionState> {
   cache = await getState();
@@ -94,13 +105,46 @@ async function refreshBadge(): Promise<void> {
 // Websocket lifecycle
 // ---------------------------------------------------------------------------
 
-function send(frame: unknown): boolean {
+/** True once the runtime has answered `hello` with `sync`. */
+let ready = false;
+/** Outbound frames held until the handshake completes. */
+const outbox: string[] = [];
+
+function send(frame: Record<string, unknown>): boolean {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  const type = String(frame.type ?? '');
+  if (!ready && type !== 'hello' && type !== 'pong') {
+    // Never race the handshake: the runtime closes the socket on a pre-auth frame.
+    if (outbox.length < 50) outbox.push(JSON.stringify(frame));
+    return false;
+  }
+  let text = JSON.stringify(frame);
+  if (text.length > LIMITS.maxMessageBytes) {
+    if (type === 'result') {
+      frame.body = '';
+      frame.truncated = true;
+      delete frame.redirectedTo;
+      text = JSON.stringify(frame);
+    }
+    if (text.length > LIMITS.maxMessageBytes) return false;
+  }
   try {
-    socket.send(JSON.stringify(frame));
+    socket.send(text);
     return true;
   } catch {
     return false;
+  }
+}
+
+function flushOutbox(): void {
+  while (ready && outbox.length > 0) {
+    const text = outbox.shift()!;
+    try {
+      socket?.send(text);
+    } catch {
+      /* the socket is gone; the reconnect path will retry the flush */
+      return;
+    }
   }
 }
 
@@ -129,16 +173,27 @@ async function connect(): Promise<void> {
   }
   socket = ws;
 
+  let failed = false;
   const fail = async (message: string) => {
-    if (socket === ws) socket = null;
+    // A close/error from a socket that was already replaced must not clobber the
+    // live one's state (that made the popup show "Offline" while calls worked).
+    if (socket !== ws) return;
+    if (failed) return;
+    failed = true;
+    socket = null;
     connected = false;
+    ready = false;
+    outbox.length = 0;
     await setState({ lastError: message });
     await refreshBadge();
     scheduleReconnect();
   };
 
   ws.addEventListener('message', (event) => {
-    void handleFrame(String(event.data));
+    void handleFrame(String(event.data)).catch(async (error: unknown) => {
+      // A malformed or hostile frame must never become an unhandled rejection.
+      await setState({ lastError: `Ignored a bad frame: ${error instanceof Error ? error.message : 'unknown'}` });
+    });
   });
   ws.addEventListener('close', () => {
     void fail('Disconnected from the runtime.');
@@ -181,40 +236,57 @@ async function handleFrame(raw: string): Promise<void> {
       const deep = Array.isArray(frame.deepCaptureOrigins) ? (frame.deepCaptureOrigins as string[]) : [];
       const enums = Array.isArray(frame.enumCaptureOrigins) ? (frame.enumCaptureOrigins as string[]) : [];
       syncLog.push(`${enabledOrigins.join('|')}#${deep.join('|')}`);
-      await setState({
+      if (syncLog.length > 20) syncLog.splice(0, syncLog.length - 20);
+      const serverCapturing = Array.isArray(frame.capturing) ? (frame.capturing as string[]) : [];
+      // The runtime is authoritative for capture state: after a reconnect its
+      // set is what counts, otherwise discovery silently stops while the
+      // extension still believes it is recording.
+      await setState(() => ({
+        capturing: serverCapturing.filter((origin) => enabledOrigins.includes(origin)),
         enabledOrigins,
         deepCaptureOrigins: deep,
         enumCaptureOrigins: enums,
-        capturing: (cache?.capturing ?? []).filter((origin) => enabledOrigins.includes(origin)),
         lastError: null,
         lastConnectedAt: new Date().toISOString(),
-      });
+      }));
       cache = await getState();
       connected = true;
+      ready = true;
       reconnectDelay = RECONNECT_MIN_MS;
+      flushOutbox();
       await refreshBadge();
       await refreshWebRequestListeners();
       void publishStatus();
       return;
     }
-    case 'execute':
-      void handleExecute(frame as unknown as ExecuteMessage);
+    case 'execute': {
+      // Parse, do not cast: a malformed frame must not become a fetch with an
+      // undefined timeout (which aborts after 0 ms).
+      const parsed = ExecuteMessageSchema.safeParse(frame);
+      if (!parsed.success) {
+        await setState({ lastError: 'The runtime sent an invalid execute frame.' });
+        return;
+      }
+      void handleExecute(parsed.data);
       return;
+    }
     case 'discovery_start': {
       const origin = String(frame.origin ?? '');
       if (!/^https?:\/\//.test(origin)) return;
-      const nextCapturing = new Set(cache?.capturing ?? []);
-      nextCapturing.add(origin);
-      // The runtime already knows whether schema capture is on for this origin;
-      // trusting the frame closes the window where `sync` has not arrived yet.
-      const nextDeep = new Set(cache?.deepCaptureOrigins ?? []);
-      if (frame.deepCapture === true) nextDeep.add(origin);
-      const nextEnums = new Set(cache?.enumCaptureOrigins ?? []);
-      if (frame.captureEnums === true) nextEnums.add(origin);
-      await setState({
-        capturing: [...nextCapturing],
-        deepCaptureOrigins: [...nextDeep],
-        enumCaptureOrigins: [...nextEnums],
+      // Compute inside the write queue: `sync` and `discovery_start` arrive
+      // together, and a snapshot taken here would undo the other one.
+      await setState((current) => {
+        const capturingNext = new Set(current.capturing);
+        capturingNext.add(origin);
+        const deepNext = new Set(current.deepCaptureOrigins);
+        if (frame.deepCapture === true) deepNext.add(origin);
+        const enumNext = new Set(current.enumCaptureOrigins);
+        if (frame.captureEnums === true) enumNext.add(origin);
+        return {
+          capturing: [...capturingNext],
+          deepCaptureOrigins: [...deepNext],
+          enumCaptureOrigins: [...enumNext],
+        };
       });
       cache = await getState();
       await refreshWebRequestListeners();
@@ -223,9 +295,15 @@ async function handleFrame(raw: string): Promise<void> {
     }
     case 'discovery_stop': {
       const origin = String(frame.origin ?? '');
-      const next = new Set(cache?.capturing ?? []);
-      next.delete(origin);
-      await setState({ capturing: [...next] });
+      await setState((current) => {
+        // Stopping capture also stops schema capture for that origin; otherwise
+        // a later start silently re-enables deep capture the user turned off.
+        const capturingNext = new Set(current.capturing);
+        capturingNext.delete(origin);
+        const deepNext = new Set(current.deepCaptureOrigins);
+        deepNext.delete(origin);
+        return { capturing: [...capturingNext], deepCaptureOrigins: [...deepNext] };
+      });
       cache = await getState();
       void publishStatus();
       return;
@@ -263,6 +341,52 @@ function resultFrame(id: string, patch: Partial<ResultMessage>): ResultMessage {
   } as ResultMessage;
 }
 
+/**
+ * Read a response body with a hard byte cap.
+ *
+ * `arrayBuffer()` reads everything first, so one large download could exhaust
+ * the service worker (and the abort timer used to be cleared before the read).
+ */
+async function readCapped(response: Response, signal: AbortSignal): Promise<{ text: string; truncated: boolean; bytes: number }> {
+  const reader = response.body?.getReader();
+  if (!reader) return { text: '', truncated: false, bytes: 0 };
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (;;) {
+    if (signal.aborted) {
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    if (bytes + value.byteLength > MAX_RESPONSE_BYTES) {
+      const room = MAX_RESPONSE_BYTES - bytes;
+      if (room > 0) {
+        chunks.push(value.subarray(0, room));
+        bytes += room;
+      }
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+    bytes += value.byteLength;
+  }
+  const merged = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  // Never cut a multi-byte UTF-8 character in half.
+  let end = merged.byteLength;
+  while (end > 0 && (merged[end - 1] & 0b1100_0000) === 0b1000_0000) end -= 1;
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(merged.subarray(0, end));
+  return { text, truncated: truncated || end < merged.byteLength, bytes };
+}
+
 async function fetchCsrfToken(
   baseOrigin: string,
   domain: string,
@@ -271,13 +395,29 @@ async function fetchCsrfToken(
   // The bootstrap call must stay on the same origin as the tool, including the
   // port, so derive it from the already-validated request URL.
   const target = new URL(csrf.bootstrapPath, baseOrigin).toString();
-  const checked = checkTargetUrl(target, domain);
+  const checked = checkTargetUrl(target, domain, { expectedOrigin: baseOrigin });
   if (!checked.ok || !checked.url) return null;
-  const response = await fetch(checked.url.toString(), { credentials: 'include', cache: 'no-store' });
-  if (!response.ok) return null;
-  const parsed = (await response.json()) as Record<string, unknown>;
-  const value = parsed[csrf.tokenField];
-  return typeof value === 'string' && value.length > 0 && value.length < 4096 ? value : null;
+  // The bootstrap call is on the critical path: bound it in time and size.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(checked.url.toString(), {
+      credentials: 'include',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const declared = Number(response.headers.get('content-length') ?? '0');
+    if (declared > MAX_CSRF_BYTES) return null;
+    const text = (await response.text()).slice(0, MAX_CSRF_BYTES);
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const value = parsed[csrf.tokenField];
+    return typeof value === 'string' && value.length > 0 && value.length < 4096 ? value : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function handleExecute(message: ExecuteMessage): Promise<void> {
@@ -334,8 +474,11 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
 
     const controller = new AbortController();
     inflight.set(message.id, controller);
+    // The timer covers the body read as well, not just the headers.
     const timer = setTimeout(() => controller.abort(), message.timeoutMs);
     let response: Response;
+    let bodyText = '';
+    let truncated = false;
     try {
       response = await fetch(verdict.url.toString(), {
         method: message.method,
@@ -346,6 +489,13 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
         cache: 'no-store',
         signal: controller.signal,
       });
+      if (response.type !== 'opaqueredirect' && response.status !== 0) {
+        // Stream with a hard cap instead of `arrayBuffer()`, which would
+        // materialise a multi-hundred-megabyte body in the worker first.
+        const read = await readCapped(response, controller.signal);
+        bodyText = read.text;
+        truncated = read.truncated;
+      }
     } finally {
       clearTimeout(timer);
       inflight.delete(message.id);
@@ -367,10 +517,7 @@ async function handleExecute(message: ExecuteMessage): Promise<void> {
       return;
     }
 
-    const buffer = await response.arrayBuffer();
-    const truncated = buffer.byteLength > MAX_RESPONSE_BYTES;
-    const slice = truncated ? buffer.slice(0, MAX_RESPONSE_BYTES) : buffer;
-    const body = new TextDecoder('utf-8').decode(slice);
+    const body = bodyText;
 
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
@@ -447,7 +594,11 @@ async function refreshWebRequestListeners(): Promise<void> {
   const granted = await chrome.permissions.getAll();
   const allowed = new Set(granted.origins ?? []);
   const filters = [...origins].filter((origin) => allowed.has(origin));
-  if (filters.length === 0) return;
+  if (filters.length === 0) {
+    // No granted origin: detach rather than keep observing stale patterns.
+    detachWebRequestListeners();
+    return;
+  }
   if (listenersAttached && filters.join(',') === webRequestFilters.join(',')) return;
 
   detachWebRequestListeners();
@@ -456,6 +607,25 @@ async function refreshWebRequestListeners(): Promise<void> {
     chrome.webRequest.onBeforeRequest.addListener(onBeforeRequest, { urls: filters });
     chrome.webRequest.onCompleted.addListener(onCompleted, { urls: filters }, ['responseHeaders']);
     listenersAttached = true;
+  } catch {
+    listenersAttached = false;
+  }
+}
+
+/**
+ * Attach the loopback listeners synchronously at module scope.
+ *
+ * MV3 only wakes a worker for listeners registered during its initial
+ * evaluation; registering after an `await` means a suspended worker stops
+ * observing until the alarm happens to restart it.
+ */
+function attachStaticListeners(): void {
+  const urls = ['http://127.0.0.1/*', 'http://localhost/*'];
+  try {
+    chrome.webRequest.onBeforeRequest.addListener(onBeforeRequest, { urls });
+    chrome.webRequest.onCompleted.addListener(onCompleted, { urls }, ['responseHeaders']);
+    listenersAttached = true;
+    webRequestFilters = urls;
   } catch {
     listenersAttached = false;
   }
@@ -483,10 +653,13 @@ function detachWebRequestListeners(): void {
 }
 
 function flushDiscovery(): void {
-  if (!connected) return;
-  const events = collector.drain();
+  if (!connected || !ready) return;
+  const events = collector.peek(40);
   if (!events.length) return;
-  send({ type: 'discovery', events });
+  // Commit only after the frame is on the wire; draining first lost a batch
+  // whenever the socket died in the window between the check and the write.
+  if (!send({ type: 'discovery', events })) return;
+  collector.commit(events.length);
 }
 
 let flushDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -564,6 +737,16 @@ async function pair(runtimeUrl: string, code: string): Promise<{ ok: boolean; er
   if (!response.ok || !payload.clientId) {
     return { ok: false, error: payload.message ?? `Pairing failed (HTTP ${response.status}).` };
   }
+  // Drop any existing socket first: without this, `connect()` returns early and
+  // the extension stays authenticated to the previous runtime.
+  try {
+    socket?.close(4000, 're-paired');
+  } catch {
+    /* already gone */
+  }
+  socket = null;
+  connected = false;
+  ready = false;
   await setState({
     runtimeUrl: base,
     clientId: payload.clientId,
@@ -615,8 +798,24 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
     }
     if (type === 'ubs:tap') {
       tapMessages += 1;
+      // A page can call window.postMessage freely; bound what it can cost us.
+      const payload = message.payload as TapEvent | undefined;
+      if (!payload || typeof payload.url !== 'string' || payload.url.length > 2048) {
+        respond({ ok: false, error: 'invalid tap payload' });
+        return;
+      }
+      const now = Date.now();
+      if (now - lastTapAt > 1_000) {
+        tapBudget = 0;
+        lastTapAt = now;
+      }
+      tapBudget += 1;
+      if (tapBudget > 200) {
+        respond({ ok: false, error: 'tap rate limited' });
+        return;
+      }
       const before = collector.size;
-      collector.onTap(message.payload as TapEvent);
+      collector.onTap(payload);
       if (collector.size > before) tapAccepted += 1;
       scheduleFlush();
       respond({ ok: true });
@@ -633,6 +832,12 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
     respond({ ok: false, error: 'unknown message' });
   })();
   return true;
+});
+
+attachStaticListeners();
+chrome.runtime.onSuspend.addListener(() => {
+  // Best effort: flush whatever discovery buffered before the worker is torn down.
+  flushDiscovery();
 });
 
 chrome.runtime.onInstalled.addListener(() => {
